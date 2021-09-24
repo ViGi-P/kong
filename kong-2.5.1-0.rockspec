@@ -1,10 +1,10 @@
 package = "kong"
-version = "2.5.0-0"
+version = "2.5.1-0"
 rockspec_format = "3.0"
 supported_platforms = {"linux", "macosx"}
 source = {
   url = "git://github.com/Kong/kong",
-  tag = "2.5.0"
+  tag = "2.5.1"
 }
 description = {
   summary = "Kong is a scalable and customizable API Management Layer built on top of Nginx.",
@@ -13,10 +13,10 @@ description = {
 }
 dependencies = {
   "inspect == 3.1.1",
-  "luasec == 1.0.1",
+  "luasec == 1.0.2",
   "luasocket == 3.0-rc1",
-  "penlight == 1.10.0",
-  "lua-resty-http == 0.15",
+  "penlight == 1.11.0",
+  "lua-resty-http == 0.16.1",
   "lua-resty-jit-uuid == 0.0.7",
   "lua-ffi-zlib == 0.5",
   "multipart == 0.5.9",
@@ -40,14 +40,11 @@ dependencies = {
   "lua-resty-counter == 0.2.1",
   "lua-resty-ipmatcher == 0.6.1",
   "lua-resty-acme == 0.7.1",
+  "lua-resty-session == 3.8",
   -- external Kong plugins
   "kong-plugin-azure-functions ~> 1.0",
   "kong-plugin-zipkin ~> 1.4",
-  "kong-plugin-serverless-functions ~> 2.1",
-  "kong-proxy-cache-plugin ~> 1.3",
   "kong-plugin-request-transformer ~> 1.3",
-  "kong-plugin-session ~> 2.4",
-  "kong-plugin-grpc-web ~> 0.2",
 }
 build = {
   type = "builtin",
@@ -63,6 +60,7 @@ build = {
     ["kong.constants"] = "kong/constants.lua",
     ["kong.singletons"] = "kong/singletons.lua",
     ["kong.concurrency"] = "kong/concurrency.lua",
+    ["kong.deprecation"] = "kong/deprecation.lua",
     ["kong.globalpatches"] = "kong/globalpatches.lua",
     ["kong.error_handlers"] = "kong/error_handlers.lua",
     ["kong.hooks"] = "kong/hooks.lua",
@@ -73,6 +71,7 @@ build = {
     ["kong.clustering"] = "kong/clustering/init.lua",
     ["kong.clustering.data_plane"] = "kong/clustering/data_plane.lua",
     ["kong.clustering.control_plane"] = "kong/clustering/control_plane.lua",
+    ["kong.clustering.compat.removed_fields"] = "kong/clustering/compat/removed_fields.lua",
 
     ["kong.cluster_events"] = "kong/cluster_events/init.lua",
     ["kong.cluster_events.strategies.cassandra"] = "kong/cluster_events/strategies/cassandra.lua",
@@ -404,7 +403,6 @@ build = {
     ["kong.plugins.aws-lambda.iam-ecs-credentials"]  = "kong/plugins/aws-lambda/iam-ecs-credentials.lua",
     ["kong.plugins.aws-lambda.schema"]               = "kong/plugins/aws-lambda/schema.lua",
     ["kong.plugins.aws-lambda.v4"]                   = "kong/plugins/aws-lambda/v4.lua",
-    ["kong.plugins.aws-lambda.http.connect-better"]  = "kong/plugins/aws-lambda/http/connect-better.lua",
     ["kong.plugins.aws-lambda.request-util"]         = "kong/plugins/aws-lambda/request-util.lua",
 
     ["kong.plugins.grpc-gateway.deco"] = "kong/plugins/grpc-gateway/deco.lua",
@@ -428,5 +426,36 @@ build = {
     ["kong.plugins.prometheus.prometheus"] = "kong/plugins/prometheus/prometheus.lua",
     ["kong.plugins.prometheus.serve"] = "kong/plugins/prometheus/serve.lua",
     ["kong.plugins.prometheus.schema"] = "kong/plugins/prometheus/schema.lua",
+
+    ["kong.plugins.session.handler"] = "kong/plugins/session/handler.lua",
+    ["kong.plugins.session.schema"] = "kong/plugins/session/schema.lua",
+    ["kong.plugins.session.access"] = "kong/plugins/session/access.lua",
+    ["kong.plugins.session.header_filter"] = "kong/plugins/session/header_filter.lua",
+    ["kong.plugins.session.session"] = "kong/plugins/session/session.lua",
+    ["kong.plugins.session.daos"] = "kong/plugins/session/daos.lua",
+    ["kong.plugins.session.storage.kong"] = "kong/plugins/session/storage/kong.lua",
+    ["kong.plugins.session.migrations.000_base_session"] = "kong/plugins/session/migrations/000_base_session.lua",
+    ["kong.plugins.session.migrations.001_add_ttl_index"] = "kong/plugins/session/migrations/001_add_ttl_index.lua",
+    ["kong.plugins.session.migrations"] = "kong/plugins/session/migrations/init.lua",
+
+    ["kong.plugins.proxy-cache.handler"]              = "kong/plugins/proxy-cache/handler.lua",
+    ["kong.plugins.proxy-cache.cache_key"]            = "kong/plugins/proxy-cache/cache_key.lua",
+    ["kong.plugins.proxy-cache.schema"]               = "kong/plugins/proxy-cache/schema.lua",
+    ["kong.plugins.proxy-cache.api"]                  = "kong/plugins/proxy-cache/api.lua",
+    ["kong.plugins.proxy-cache.strategies"]           = "kong/plugins/proxy-cache/strategies/init.lua",
+    ["kong.plugins.proxy-cache.strategies.memory"]    = "kong/plugins/proxy-cache/strategies/memory.lua",
+
+    ["kong.plugins.grpc-web.deco"] = "kong/plugins/grpc-web/deco.lua",
+    ["kong.plugins.grpc-web.handler"] = "kong/plugins/grpc-web/handler.lua",
+    ["kong.plugins.grpc-web.schema"] = "kong/plugins/grpc-web/schema.lua",
+
+    ["kong.plugins.pre-function._handler"] = "kong/plugins/pre-function/_handler.lua",
+    ["kong.plugins.pre-function._schema"] = "kong/plugins/pre-function/_schema.lua",
+
+    ["kong.plugins.pre-function.handler"] = "kong/plugins/pre-function/handler.lua",
+    ["kong.plugins.pre-function.schema"] = "kong/plugins/pre-function/schema.lua",
+
+    ["kong.plugins.post-function.handler"] = "kong/plugins/post-function/handler.lua",
+    ["kong.plugins.post-function.schema"] = "kong/plugins/post-function/schema.lua",
   }
 }

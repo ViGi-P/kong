@@ -60,7 +60,7 @@ local function init()
                                           "Health status of targets of upstream. " ..
                                           "States = healthchecks_off|healthy|unhealthy|dns_error, " ..
                                           "value is 1 when state is populated.",
-                                          {"upstream", "target", "address", "state"})
+                                          {"upstream", "target", "address", "state", "subsystem"})
 
   local memory_stats = {}
   memory_stats.worker_vms = prometheus:gauge("memory_workers_lua_vms_bytes",
@@ -121,6 +121,19 @@ local function init()
     metrics.data_plane_version_compatible = prometheus:gauge("data_plane_version_compatible",
                                               "Version compatible status of the data plane, 0 is incompatible",
                                               {"node_id", "hostname", "ip", "kong_version"})
+  elseif role == "data_plane" then
+    local data_plane_cluster_cert_expiry_timestamp = prometheus:gauge(
+      "data_plane_cluster_cert_expiry_timestamp",
+      "Unix timestamp of Data Plane's cluster_cert expiry time")
+    -- The cluster_cert doesn't change once Kong starts.
+    -- We set this metrics just once to avoid file read in each scrape.
+    local f = assert(io.open(kong.configuration.cluster_cert))
+    local pem = assert(f:read("*a"))
+    f:close()
+    local x509 = require("resty.openssl.x509")
+    local cert = assert(x509.new(pem, "PEM"))
+    local not_after = assert(cert:get_not_after())
+    data_plane_cluster_cert_expiry_timestamp:set(not_after)
   end
 end
 
@@ -140,10 +153,10 @@ end
 local labels_table = {0, 0, 0}
 local labels_table4 = {0, 0, 0, 0}
 local upstream_target_addr_health_table = {
-  { value = 0, labels = { 0, 0, 0, "healthchecks_off" } },
-  { value = 0, labels = { 0, 0, 0, "healthy" } },
-  { value = 0, labels = { 0, 0, 0, "unhealthy" } },
-  { value = 0, labels = { 0, 0, 0, "dns_error" } },
+  { value = 0, labels = { 0, 0, 0, "healthchecks_off", ngx.config.subsystem } },
+  { value = 0, labels = { 0, 0, 0, "healthy", ngx.config.subsystem } },
+  { value = 0, labels = { 0, 0, 0, "unhealthy", ngx.config.subsystem } },
+  { value = 0, labels = { 0, 0, 0, "dns_error", ngx.config.subsystem } },
 }
 
 local function set_healthiness_metrics(table, upstream, target, address, status, metrics_bucket)

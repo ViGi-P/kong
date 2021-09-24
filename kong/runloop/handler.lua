@@ -11,6 +11,7 @@ local singletons   = require "kong.singletons"
 local certificate  = require "kong.runloop.certificate"
 local concurrency  = require "kong.concurrency"
 local declarative  = require "kong.db.declarative"
+local workspaces   = require "kong.workspaces"
 local PluginsIterator = require "kong.runloop.plugins_iterator"
 
 
@@ -30,12 +31,14 @@ local ngx          = ngx
 local var          = ngx.var
 local log          = ngx.log
 local exit         = ngx.exit
+local exec         = ngx.exec
 local null         = ngx.null
 local header       = ngx.header
 local timer_at     = ngx.timer.at
 local timer_every  = ngx.timer.every
 local subsystem    = ngx.config.subsystem
 local clear_header = ngx.req.clear_header
+local http_version = ngx.req.http_version
 local unpack       = unpack
 local escape       = require("kong.tools.uri").escape
 
@@ -57,7 +60,6 @@ local HOST_PORTS = {}
 
 
 local SUBSYSTEMS = constants.PROTOCOLS_WITH_SUBSYSTEM
-local EMPTY_T = {}
 local TTL_ZERO = { ttl = 0 }
 
 
@@ -253,6 +255,12 @@ local function register_balancer_events(core_cache, worker_events, cluster_event
   worker_events.register(function(data)
     local operation = data.operation
     local upstream = data.entity
+    local ws_id = workspaces.get_workspace_id()
+    if not data.entity.ws_id then
+      log(DEBUG, "Event crud ", operation, " for upstream ", upstream.id,
+          " received without ws_id, adding.")
+      data.entity.ws_id = ws_id
+    end
     -- => to worker_events node handler
     local ok, err = worker_events.post("balancer", "upstreams", {
         operation = data.operation,
@@ -263,7 +271,7 @@ local function register_balancer_events(core_cache, worker_events, cluster_event
         operation, " to workers: ", err)
     end
     -- => to cluster_events handler
-    local key = fmt("%s:%s:%s", operation, upstream.id, upstream.name)
+    local key = fmt("%s:%s:%s:%s", operation, data.entity.ws_id, upstream.id, upstream.name)
     local ok, err = cluster_events:broadcast("balancer:upstreams", key)
     if not ok then
       log(ERR, "failed broadcasting upstream ", operation, " to cluster: ", err)
@@ -276,6 +284,12 @@ local function register_balancer_events(core_cache, worker_events, cluster_event
     local operation = data.operation
     local upstream = data.entity
 
+    if not data.entity.ws_id then
+      log(CRIT, "Operation ", operation, " for upstream ", data.entity.id,
+          " received without workspace, discarding.")
+      return
+    end
+
     singletons.core_cache:invalidate_local("balancer:upstreams")
     singletons.core_cache:invalidate_local("balancer:upstreams:" .. upstream.id)
 
@@ -285,10 +299,11 @@ local function register_balancer_events(core_cache, worker_events, cluster_event
 
 
   cluster_events:subscribe("balancer:upstreams", function(data)
-    local operation, id, name = unpack(utils.split(data, ":"))
+    local operation, ws_id, id, name = unpack(utils.split(data, ":"))
     local entity = {
       id = id,
       name = name,
+      ws_id = ws_id,
     }
     -- => to worker_events node handler
     local ok, err = worker_events.post("balancer", "upstreams", {
@@ -821,30 +836,39 @@ do
 
   function balancer_prepare(ctx, scheme, host_type, host, port,
                             service, route)
+    local retries
+    local connect_timeout
+    local send_timeout
+    local read_timeout
+
+    if service then
+      retries         = service.retries
+      connect_timeout = service.connect_timeout
+      send_timeout    = service.write_timeout
+      read_timeout    = service.read_timeout
+    end
+
     local balancer_data = {
-      scheme         = scheme,    -- scheme for balancer: http, https
-      type           = host_type, -- type of 'host': ipv4, ipv6, name
-      host           = host,      -- target host per `service` entity
-      port           = port,      -- final target port
-      try_count      = 0,         -- retry counter
+      scheme             = scheme,    -- scheme for balancer: http, https
+      type               = host_type, -- type of 'host': ipv4, ipv6, name
+      host               = host,      -- target host per `service` entity
+      port               = port,      -- final target port
+      try_count          = 0,         -- retry counter
+
+      retries            = retries         or 5,
+      connect_timeout    = connect_timeout or 60000,
+      send_timeout       = send_timeout    or 60000,
+      read_timeout       = read_timeout    or 60000,
+
       -- stores info per try, metatable is needed for basic log serializer
       -- see #6390
-      tries          = setmetatable({}, ARRAY_MT),
-      -- ip          = nil,       -- final target IP address
-      -- balancer    = nil,       -- the balancer object, if any
-      -- hostname    = nil,       -- hostname of the final target IP
-      -- hash_cookie = nil,       -- if Upstream sets hash_on_cookie
-      -- balancer_handle = nil,   -- balancer handle for the current connection
+      tries              = setmetatable({}, ARRAY_MT),
+      -- ip              = nil,       -- final target IP address
+      -- balancer        = nil,       -- the balancer object, if any
+      -- hostname        = nil,       -- hostname of the final target IP
+      -- hash_cookie     = nil,       -- if Upstream sets hash_on_cookie
+      -- balancer_handle = nil,       -- balancer handle for the current connection
     }
-
-    do
-      local s = service or EMPTY_T
-
-      balancer_data.retries         = s.retries         or 5
-      balancer_data.connect_timeout = s.connect_timeout or 60000
-      balancer_data.send_timeout    = s.write_timeout   or 60000
-      balancer_data.read_timeout    = s.read_timeout    or 60000
-    end
 
     ctx.service          = service
     ctx.route            = route
@@ -1113,10 +1137,6 @@ return {
     before = function(ctx)
       local server_port = var.server_port
       ctx.host_port = HOST_PORTS[server_port] or server_port
-
-      -- special handling for proxy-authorization header in case
-      -- the plugin(s) want to specify them (store the original)
-      ctx.http_proxy_authorization = var.http_proxy_authorization
     end,
     after = NOOP,
   },
@@ -1130,21 +1150,21 @@ return {
         return
       end
 
+      ctx.scheme = var.scheme
+      ctx.request_uri = var.request_uri
+
       -- routing request
       local router = get_updated_router()
-      local match_t = router.exec()
+      local match_t = router.exec(ctx)
       if not match_t then
         return kong.response.exit(404, { message = "no Route matched with those values" })
       end
 
       ctx.workspace = match_t.route and match_t.route.ws_id
 
-      local http_version   = ngx.req.http_version()
-      local scheme         = var.scheme
       local host           = var.host
       local port           = tonumber(ctx.host_port, 10)
                           or tonumber(var.server_port, 10)
-      local content_type   = var.content_type
 
       local route          = match_t.route
       local service        = match_t.service
@@ -1168,20 +1188,20 @@ return {
 
       local trusted_ip = kong.ip.is_trusted(realip_remote_addr)
       if trusted_ip then
-        forwarded_proto  = var.http_x_forwarded_proto  or scheme
+        forwarded_proto  = var.http_x_forwarded_proto  or ctx.scheme
         forwarded_host   = var.http_x_forwarded_host   or host
         forwarded_port   = var.http_x_forwarded_port   or port
         forwarded_path   = var.http_x_forwarded_path
         forwarded_prefix = var.http_x_forwarded_prefix
 
       else
-        forwarded_proto  = scheme
+        forwarded_proto  = ctx.scheme
         forwarded_host   = host
         forwarded_port   = port
       end
 
       if not forwarded_path then
-        forwarded_path = var.request_uri
+        forwarded_path = ctx.request_uri
         local p = find(forwarded_path, "?", 2, true)
         if p then
           forwarded_path = sub(forwarded_path, 1, p - 1)
@@ -1210,37 +1230,38 @@ return {
         or redirect_status_code == 307
         or redirect_status_code == 308
         then
-          header["Location"] = "https://" .. forwarded_host .. var.request_uri
+          header["Location"] = "https://" .. forwarded_host .. ctx.request_uri
           return kong.response.exit(redirect_status_code)
         end
       end
 
-      -- mismatch: non-http/2 request matched grpc route
-      if (protocols and (protocols.grpc or protocols.grpcs) and http_version ~= 2 and
-        (content_type and sub(content_type, 1, #"application/grpc") == "application/grpc"))
-      then
-        return kong.response.exit(426, { message = "Please use HTTP2 protocol" }, {
-          ["connection"] = "Upgrade",
-          ["upgrade"]    = "HTTP/2",
-        })
-      end
+      local protocol_version = http_version()
+      if protocols.grpc or protocols.grpcs then
+        -- perf: branch usually not taken, don't cache var outside
+        local content_type = var.content_type
 
-      -- mismatch: non-grpc request matched grpc route
-      if (protocols and (protocols.grpc or protocols.grpcs) and
-        (not content_type or sub(content_type, 1, #"application/grpc") ~= "application/grpc"))
-      then
-        return kong.response.exit(415, { message = "Non-gRPC request matched gRPC route" })
-      end
+        if content_type and sub(content_type, 1, #"application/grpc") == "application/grpc" then
+          if protocol_version ~= 2 then
+            -- mismatch: non-http/2 request matched grpc route
+            return kong.response.exit(426, { message = "Please use HTTP2 protocol" }, {
+              ["connection"] = "Upgrade",
+              ["upgrade"]    = "HTTP/2",
+            })
+          end
 
-      -- mismatch: grpc request matched grpcs route
-      if (protocols and protocols.grpcs and not protocols.grpc and
-        forwarded_proto ~= "https")
-      then
-        return kong.response.exit(200, nil, {
-          ["content-type"] = "application/grpc",
-          ["grpc-status"] = 1,
-          ["grpc-message"] = "gRPC request matched gRPCs route",
-        })
+        else
+          -- mismatch: non-grpc request matched grpc route
+          return kong.response.exit(415, { message = "Non-gRPC request matched gRPC route" })
+        end
+
+        if not protocols.grpc and forwarded_proto ~= "https" then
+          -- mismatch: grpc request matched grpcs route
+          return kong.response.exit(200, nil, {
+            ["content-type"] = "application/grpc",
+            ["grpc-status"] = 1,
+            ["grpc-message"] = "gRPC request matched gRPCs route",
+          })
+        end
       end
 
       balancer_prepare(ctx, match_t.upstream_scheme,
@@ -1289,49 +1310,62 @@ return {
       -- to `grpc_pass`. After redirection, this function will return early
       if service and var.kong_proxy_mode == "http" then
         if service.protocol == "grpc" or service.protocol == "grpcs" then
-          return ngx.exec("@grpc")
+          return exec("@grpc")
         end
 
-        if http_version == 1.1 then
+        if protocol_version == 1.1 then
           if route.request_buffering == false then
             if route.response_buffering == false then
-              return ngx.exec("@unbuffered")
+              return exec("@unbuffered")
             end
 
-            return ngx.exec("@unbuffered_request")
+            return exec("@unbuffered_request")
           end
 
           if route.response_buffering == false then
-            return ngx.exec("@unbuffered_response")
+            return exec("@unbuffered_response")
           end
         end
       end
     end,
     -- Only executed if the `router` module found a route and allows nginx to proxy it.
     after = function(ctx)
-      do
-        -- Nginx's behavior when proxying a request with an empty querystring
-        -- `/foo?` is to keep `$is_args` an empty string, hence effectively
-        -- stripping the empty querystring.
-        -- We overcome this behavior with our own logic, to preserve user
-        -- desired semantics.
-        local upstream_uri = var.upstream_uri
-
-        if var.is_args == "?" or sub(var.request_uri, -1) == "?" then
-          var.upstream_uri = upstream_uri .. "?" .. (var.args or "")
-        end
+      -- Nginx's behavior when proxying a request with an empty querystring
+      -- `/foo?` is to keep `$is_args` an empty string, hence effectively
+      -- stripping the empty querystring.
+      -- We overcome this behavior with our own logic, to preserve user
+      -- desired semantics.
+      -- perf: branch usually not taken, don't cache var outside
+      if sub(ctx.request_uri or var.request_uri, -1) == "?" then
+        var.upstream_uri = var.upstream_uri .. "?"
+      elseif var.is_args == "?" then
+        var.upstream_uri = var.upstream_uri .. "?" .. var.args or ""
       end
 
       local balancer_data = ctx.balancer_data
       balancer_data.scheme = var.upstream_scheme -- COMPAT: pdk
+      local upstream_scheme = balancer_data.scheme
 
       -- The content of var.upstream_host is only set by the router if
       -- preserve_host is true
       --
       -- We can't rely on var.upstream_host for balancer retries inside
       -- `set_host_header` because it would never be empty after the first -- balancer try
-      if var.upstream_host ~= nil and var.upstream_host ~= "" then
+      local upstream_host = var.upstream_host
+      if upstream_host ~= nil and upstream_host ~= "" then
         balancer_data.preserve_host = true
+
+        -- the nginx grpc module does not offer a way to override the
+        -- :authority pseudo-header; use our internal API to do so
+        -- this call applies to routes with preserve_host=true; for
+        -- preserve_host=false, the header is set in `set_host_header`,
+        -- so that it also applies to balancer retries
+        if upstream_scheme == "grpc" or upstream_scheme == "grpcs" then
+          local ok, err = kong.service.request.set_header(":authority", upstream_host)
+          if not ok then
+            log(ERR, "failed to set :authority header: ", err)
+          end
+        end
       end
 
       local ok, err, errcode = balancer_execute(ctx)
@@ -1340,38 +1374,26 @@ return {
         return kong.response.exit(errcode, body)
       end
 
+      upstream_scheme = balancer_data.scheme
       var.upstream_scheme = balancer_data.scheme
 
-      local ok, err = balancer.set_host_header(balancer_data)
+      local ok, err = balancer.set_host_header(balancer_data, upstream_scheme, upstream_host)
       if not ok then
-        ngx.log(ngx.ERR, "failed to set balancer Host header: ", err)
-
-        return ngx.exit(500)
-      end
-
-      -- the nginx grpc module does not offer a way to override the
-      -- :authority pseudo-header; use our internal API to do so
-      local upstream_host = var.upstream_host
-      local upstream_scheme = var.upstream_scheme
-
-      if upstream_scheme == "grpc" or upstream_scheme == "grpcs" then
-        ok, err = kong.service.request.set_header(":authority", upstream_host)
-        if not ok then
-          log(ERR, "failed to set :authority header: ", err)
-        end
+        log(ERR, "failed to set balancer Host header: ", err)
+        return exit(500)
       end
 
       -- clear hop-by-hop request headers:
       for _, header_name in csv(var.http_connection) do
         -- some of these are already handled by the proxy module,
-        -- proxy-authorization and upgrade being an exception that
-        -- is handled below with special semantics.
+        -- upgrade being an exception that is handled below with
+        -- special semantics.
         if header_name == "upgrade" then
           if var.upstream_connection == "keep-alive" then
             clear_header(header_name)
           end
 
-        elseif header_name ~= "proxy-authorization" then
+        else
           clear_header(header_name)
         end
       end
@@ -1390,13 +1412,6 @@ return {
 
       if var.http_proxy_connection then
         clear_header("Proxy-Connection")
-      end
-
-      -- clear the proxy-authorization header only in case the plugin didn't
-      -- specify it, assuming that the plugin didn't specify the same value.
-      if ctx.http_proxy_authorization and
-         ctx.http_proxy_authorization == var.http_proxy_authorization then
-        clear_header("Proxy-Authorization")
       end
     end
   },
@@ -1420,10 +1435,6 @@ return {
       local upgrade = var.upstream_http_upgrade
       if upgrade and lower(upgrade) ~= lower(var.upstream_upgrade) then
         header["Upgrade"] = nil
-      end
-
-      if var.upstream_http_proxy_authenticate then
-        header["Proxy-Authenticate"] = nil
       end
 
       -- remove trailer response header when client didn't ask for them

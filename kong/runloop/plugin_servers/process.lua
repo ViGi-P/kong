@@ -189,6 +189,7 @@ end
 
 function proc_mgmt.get_plugin_info(plugin_name)
   if not _plugin_infos then
+    kong = kong or _G.kong    -- some CLI cmds set the global after loading the module.
     _plugin_infos = {}
 
     for _, server_def in ipairs(get_server_defs()) do
@@ -263,7 +264,7 @@ function proc_mgmt.pluginserver_timer(premature, server_def)
       local ok, reason, status = server_def.proc:wait()
       if ok == false and reason == "exit" and status == 127 then
         kong.log.err(string.format(
-                "external pluginserger %q start command %q exited with \"command not found\"",
+                "external pluginserver %q start command %q exited with \"command not found\"",
                 server_def.name, server_def.start_command))
         break
       elseif ok ~= nil or reason == "exited" or ngx.worker.exiting() then

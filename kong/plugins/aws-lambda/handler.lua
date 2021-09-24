@@ -2,7 +2,7 @@
 
 local aws_v4 = require "kong.plugins.aws-lambda.v4"
 local aws_serializer = require "kong.plugins.aws-lambda.aws-serializer"
-local http = require "kong.plugins.aws-lambda.http.connect-better"
+local http = require "resty.http"
 local cjson = require "cjson.safe"
 local meta = require "kong.meta"
 local constants = require "kong.constants"
@@ -13,10 +13,11 @@ local VIA_HEADER = constants.HEADERS.VIA
 local VIA_HEADER_VALUE = meta._NAME .. "/" .. meta._VERSION
 local IAM_CREDENTIALS_CACHE_KEY = "plugin.aws-lambda.iam_role_temp_creds"
 local AWS_PORT = 443
+local AWS_REGION do
+  AWS_REGION = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
+end
 
-
-local fetch_credentials
-do
+local fetch_credentials do
   local credential_sources = {
     require "kong.plugins.aws-lambda.iam-ecs-credentials",
     -- The EC2 one will always return `configured == true`, so must be the last!
@@ -32,15 +33,19 @@ do
 end
 
 
-local tostring             = tostring
-local tonumber             = tonumber
-local type                 = type
-local fmt                  = string.format
-local ngx_encode_base64    = ngx.encode_base64
-local ngx_decode_base64    = ngx.decode_base64
-local ngx_update_time      = ngx.update_time
-local ngx_now              = ngx.now
-local kong                 = kong
+local ngx_encode_base64 = ngx.encode_base64
+local ngx_decode_base64 = ngx.decode_base64
+local ngx_update_time = ngx.update_time
+local tostring = tostring
+local tonumber = tonumber
+local ngx_now = ngx.now
+local ngx_var = ngx.var
+local error = error
+local pairs = pairs
+local kong = kong
+local type = type
+local find = string.find
+local fmt = string.format
 
 
 local raw_content_types = {
@@ -123,15 +128,15 @@ local AWSLambdaHandler = {}
 
 function AWSLambdaHandler:access(conf)
   local upstream_body = kong.table.new(0, 6)
-  local var = ngx.var
+  local ctx = ngx.ctx
 
   if conf.awsgateway_compatible then
-    upstream_body = aws_serializer(ngx.ctx, conf)
+    upstream_body = aws_serializer(ctx, conf)
 
   elseif conf.forward_request_body or
-         conf.forward_request_headers or
-         conf.forward_request_method or
-         conf.forward_request_uri then
+    conf.forward_request_headers or
+    conf.forward_request_method or
+    conf.forward_request_uri then
 
     -- new behavior to forward request method, body, uri and their args
     if conf.forward_request_method then
@@ -174,16 +179,25 @@ function AWSLambdaHandler:access(conf)
   local upstream_body_json, err = cjson.encode(upstream_body)
   if not upstream_body_json then
     kong.log.err("could not JSON encode upstream body",
-    " to forward request values: ", err)
+                 " to forward request values: ", err)
   end
 
-  local host = conf.host or fmt("lambda.%s.amazonaws.com", conf.aws_region)
-  local path = fmt("/2015-03-31/functions/%s/invocations",
-                            conf.function_name)
+  local region = conf.aws_region or AWS_REGION
+  local host = conf.host
+
+  if not region and not host then
+    return error("no region or host specified")
+  end
+
+  if not host then
+    host = fmt("lambda.%s.amazonaws.com", region)
+  end
+
+  local path = fmt("/2015-03-31/functions/%s/invocations", conf.function_name)
   local port = conf.port or AWS_PORT
 
   local opts = {
-    region = conf.aws_region,
+    region = region,
     service = "lambda",
     method = "POST",
     headers = {
@@ -209,9 +223,7 @@ function AWSLambdaHandler:access(conf)
     )
 
     if not iam_role_credentials then
-      return kong.response.exit(500, {
-        message = "An unexpected error occurred"
-      })
+      return kong.response.error(500)
     end
 
     opts.access_key = iam_role_credentials.access_key
@@ -226,61 +238,55 @@ function AWSLambdaHandler:access(conf)
   local request
   request, err = aws_v4(opts)
   if err then
-    kong.log.err(err)
-    return kong.response.exit(500, { message = "An unexpected error occurred" })
+    return error(err)
+  end
+
+  local uri = port and fmt("https://%s:%d", host, port)
+                    or fmt("https://%s", host)
+
+  local proxy_opts
+  if conf.proxy_url then
+    if find(conf.proxy_url, "https", 1, true) == 1 then
+      proxy_opts = {
+        https_proxy = conf.proxy_url,
+      }
+    else
+      proxy_opts = {
+        http_proxy = conf.proxy_url,
+      }
+    end
   end
 
   -- Trigger request
   local client = http.new()
   client:set_timeout(conf.timeout)
-
   local kong_wait_time_start = get_now()
-
-  local ok
-  ok, err = client:connect_better {
-    scheme = "https",
-    host = host,
-    port = port,
-    ssl = { verify = false },
-    proxy = conf.proxy_url and {
-      uri = conf.proxy_url,
-    }
-  }
-  if not ok then
-    kong.log.err(err)
-    return kong.response.exit(500, { message = "An unexpected error occurred" })
-  end
-
-  local res, err = client:request {
+  local res, err = client:request_uri(uri, {
     method = "POST",
     path = request.url,
     body = request.body,
-    headers = request.headers
-  }
+    headers = request.headers,
+    ssl_verify = false,
+    proxy_opts = proxy_opts,
+    keepalive_timeout = conf.keepalive,
+  })
   if not res then
-    kong.log.err(err)
-    return kong.response.exit(500, { message = "An unexpected error occurred" })
+    return error(err)
   end
 
-  local content = res:read_body()
+  local content = res.body
 
   -- setting the latency here is a bit tricky, but because we are not
   -- actually proxying, it will not be overwritten
-  ngx.ctx.KONG_WAITING_TIME = get_now() - kong_wait_time_start
+  ctx.KONG_WAITING_TIME = get_now() - kong_wait_time_start
   local headers = res.headers
 
-  if var.http2 then
+  if ngx_var.http2 then
     headers["Connection"] = nil
     headers["Keep-Alive"] = nil
     headers["Proxy-Connection"] = nil
     headers["Upgrade"] = nil
     headers["Transfer-Encoding"] = nil
-  end
-
-  ok, err = client:set_keepalive(conf.keepalive)
-  if not ok then
-    kong.log.err(err)
-    return kong.response.exit(500, { message = "An unexpected error occurred" })
   end
 
   local status
@@ -291,7 +297,7 @@ function AWSLambdaHandler:access(conf)
       kong.log.err(err)
       return kong.response.exit(502, { message = "Bad Gateway",
                                        error = "could not JSON decode Lambda " ..
-                                               "function response: " .. err })
+                                         "function response: " .. err })
     end
 
     status = proxy_response.status_code
@@ -320,6 +326,6 @@ function AWSLambdaHandler:access(conf)
 end
 
 AWSLambdaHandler.PRIORITY = 750
-AWSLambdaHandler.VERSION = "3.5.4"
+AWSLambdaHandler.VERSION = "3.6.2"
 
 return AWSLambdaHandler

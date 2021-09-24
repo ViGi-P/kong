@@ -1,7 +1,7 @@
 local version = setmetatable({
   major = 2,
   minor = 5,
-  patch = 0,
+  patch = 1,
   --suffix = "rc.1"
 }, {
   -- our Makefile during certain releases adjusts this line. Any changes to
@@ -20,6 +20,6 @@ return {
   -- third-party dependencies' required version, as they would be specified
   -- to lua-version's `set()` in the form {from, to}
   _DEPENDENCIES = {
-    nginx = { "1.19.3.1", "1.19.3.2" },
+    nginx = { "1.19.3.1", "1.19.9.1" },
   }
 }

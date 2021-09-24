@@ -30,9 +30,10 @@ describe("Admin API #" .. strategy, function()
 
   lazy_setup(function()
     local fixtures = {
-      dns_mock = helpers.dns_mock.new()
+      dns_mock = helpers.dns_mock.new({
+        mocks_only = true,      -- don't fallback to "real" DNS
+      })
     }
-    fixtures.dns_mock.should_fail = true  -- don't fallback to "real" DNS
     fixtures.dns_mock:A {
       name = "custom_localhost",
       address = "127.0.0.1",
@@ -132,6 +133,12 @@ describe("Admin API #" .. strategy, function()
           assert.is_number(json.created_at)
           assert.is_string(json.id)
           assert.are.equal(0, json.weight)
+
+          -- added for testing #7699
+          local res2 = assert(client:get("/upstreams/" .. upstream.name .. "/targets/zero.weight.test:8080"))
+          assert.response(res2).has.status(200)
+          local json2 = assert.response(res2).has.jsonbody()
+          assert.same(json, json2)
         end
       end)
 

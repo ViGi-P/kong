@@ -748,12 +748,15 @@ local function sort_routes(r1, r2)
     end
   end
 
-  do
-    local rp1 = r1.route.regex_priority or 0
-    local rp2 = r2.route.regex_priority or 0
+  -- only regex path use regex_priority 
+  if band(r1.submatch_weight,MATCH_SUBRULES.HAS_REGEX_URI) ~= 0 then
+    do
+      local rp1 = r1.route.regex_priority or 0
+      local rp2 = r2.route.regex_priority or 0
 
-    if rp1 ~= rp2 then
-      return rp1 > rp2
+      if rp1 ~= rp2 then
+        return rp1 > rp2
+      end
     end
   end
 
@@ -1819,11 +1822,11 @@ function _M.new(routes)
   self._set_ngx = _set_ngx
 
   if subsystem == "http" then
-    function self.exec()
+    function self.exec(ctx)
       local req_method = get_method()
-      local req_uri = var.request_uri
+      local req_uri = ctx and ctx.request_uri or var.request_uri
       local req_host = var.http_host or ""
-      local req_scheme = var.scheme
+      local req_scheme = ctx and ctx.scheme or var.scheme
       local sni = var.ssl_server_name
 
       local headers

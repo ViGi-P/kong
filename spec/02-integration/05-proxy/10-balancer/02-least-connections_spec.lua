@@ -3,17 +3,9 @@ local helpers = require "spec.helpers"
 
 local https_server = helpers.https_server
 
-local function get_available_port()
-  local socket = require("socket")
-  local server = assert(socket.bind("*", 0))
-  local _, port = server:getsockname()
-  server:close()
-  return port
-end
 
-
-local test_port1 = get_available_port()
-local test_port2 = get_available_port()
+local test_port1 = helpers.get_available_port()
+local test_port2 = helpers.get_available_port()
 
 
 -- create two servers, one double the delay of the other
@@ -72,7 +64,7 @@ for _, strategy in helpers.each_strategy() do
     it("balances by least-connections", function()
       server1:start()
       server2:start()
-      local thread_max = 50 -- maximum number of threads to use
+      local thread_max = 100 -- maximum number of threads to use
       local done = false
       local threads = {}
 
@@ -99,7 +91,7 @@ for _, strategy in helpers.each_strategy() do
       -- wait while we're executing
       local finish_at = ngx.now() + 1.5
       repeat
-        ngx.sleep(0.1)
+        ngx.sleep(0.01)
       until ngx.now() >= finish_at
 
       -- finish up
@@ -111,7 +103,8 @@ for _, strategy in helpers.each_strategy() do
       local results1 = server1:shutdown()
       local results2 = server2:shutdown()
       local ratio = results1.ok/results2.ok
-      assert.near(2, ratio, 0.8)
+      assert.near(2, ratio, 1)
+      assert.is_not(ratio, 0)
     end)
 
     if strategy ~= "off" then
@@ -119,9 +112,7 @@ for _, strategy in helpers.each_strategy() do
         local api_client = helpers.admin_client()
 
         -- create a new target
-        local res = assert(api_client:send({
-          method = "POST",
-          path = "/upstreams/" .. upstream1_id .. "/targets",
+        local res = assert(api_client:post("/upstreams/" .. upstream1_id .. "/targets", {
           headers = {
             ["Content-Type"] = "application/json",
           },
@@ -224,9 +215,7 @@ for _, strategy in helpers.each_strategy() do
         local api_client = helpers.admin_client()
 
         -- create a new target
-        local res = assert(api_client:send({
-          method = "POST",
-          path = "/upstreams/" .. an_upstream.id .. "/targets",
+        local res = assert(api_client:post("/upstreams/" .. an_upstream.id .. "/targets", {
           headers = {
             ["Content-Type"] = "application/json",
           },

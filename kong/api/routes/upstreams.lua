@@ -1,5 +1,5 @@
 local endpoints = require "kong.api.endpoints"
-local utils = require "kong.tools.utils"
+local uuid = require "kong.tools.uuid"
 
 
 local kong = kong
@@ -10,7 +10,7 @@ local tostring = tostring
 local fmt = string.format
 
 
-local function post_health(self, db, is_healthy)
+local function set_target_health(self, db, is_healthy)
   local upstream, _, err_t = endpoints.select_entity(self, db, db.upstreams.schema)
   if err_t then
     return endpoints.handle_error(err_t)
@@ -21,11 +21,16 @@ local function post_health(self, db, is_healthy)
   end
 
   local target
-  if utils.is_valid_uuid(unescape_uri(self.params.targets)) then
+  if uuid.is_valid_uuid(unescape_uri(self.params.targets)) then
     target, _, err_t = endpoints.select_entity(self, db, db.targets.schema)
 
   else
-    local opts = endpoints.extract_options(self.args.uri, db.targets.schema, "select")
+    local opts
+    opts, _, err_t = endpoints.extract_options(db, self.args.uri, db.targets.schema, "select")
+    if err_t then
+      return endpoints.handle_error(err_t)
+    end
+
     local upstream_pk = db.upstreams.schema:extract_pk_values(upstream)
     local filter = { target = unescape_uri(self.params.targets) }
     target, _, err_t = db.targets:select_by_upstream_filter(upstream_pk, filter, opts)
@@ -49,7 +54,7 @@ end
 
 
 local function select_target_cb(self, db, upstream, target)
-  if target and target.weight ~= 0 then
+  if target then
     return kong.response.exit(200, target)
   end
 
@@ -90,11 +95,15 @@ local function target_endpoint(self, db, callback)
   end
 
   local target
-  if utils.is_valid_uuid(unescape_uri(self.params.targets)) then
+  if uuid.is_valid_uuid(unescape_uri(self.params.targets)) then
     target, _, err_t = endpoints.select_entity(self, db, db.targets.schema)
 
   else
-    local opts = endpoints.extract_options(self.args.uri, db.targets.schema, "select")
+    local opts
+    opts, _, err_t = endpoints.extract_options(db, self.args.uri, db.targets.schema, "select")
+    if err_t then
+      return endpoints.handle_error(err_t)
+    end
     local upstream_pk = db.upstreams.schema:extract_pk_values(upstream)
     local filter = { target = unescape_uri(self.params.targets) }
     target, _, err_t = db.targets:select_by_upstream_filter(upstream_pk, filter, opts)
@@ -112,22 +121,7 @@ local function target_endpoint(self, db, callback)
 end
 
 
-local function update_existent_target(self, db)
-  local upstream = endpoints.select_entity(self, db, db.upstreams.schema)
-  local filter = { target = unescape_uri(self.params.target) }
-  local opts = endpoints.extract_options(self.args.uri, db.targets.schema, "select")
-  local target = db.targets:select_by_upstream_filter(upstream, filter, opts)
-
-  if target then
-    self.params.targets = db.targets.schema:extract_pk_values(target)
-    return endpoints.update_entity(self, db, db.targets.schema)
-  end
-
-  return nil
-end
-
-
-return {
+local api_routes = {
   ["/upstreams/:upstreams/health"] = {
     GET = function(self, db)
       local upstream, _, err_t = endpoints.select_entity(self, db, db.upstreams.schema)
@@ -181,51 +175,44 @@ return {
                                             "upstream",
                                             "page_for_upstream"),
     POST = function(self, db)
-      -- updating a target using POST is a compatibility with existent API and
-      -- should be deprecated in next major version
-      local entity, _, err_t = update_existent_target(self, db)
-      if err_t then
-        return endpoints.handle_error(err_t)
-      end
-      if entity then
-        return kong.response.exit(200, entity, { ["Deprecation"] = "true" })
-      end
-
       local create = endpoints.post_collection_endpoint(kong.db.targets.schema,
                         kong.db.upstreams.schema, "upstream")
       return create(self, db)
-    end
+    end,
   },
 
   ["/upstreams/:upstreams/targets/all"] = {
-    GET = endpoints.get_collection_endpoint(kong.db.targets.schema,
-                                            kong.db.upstreams.schema,
-                                            "upstream",
-                                            "page_for_upstream_raw")
-  },
+    GET = function(self, db)
+      local schema = db.targets.schema
+      local foreign_schema = db.upstreams.schema
+      local foreign_entity, _, err_t = endpoints.select_entity(self, db, foreign_schema)
+      if err_t then
+        return endpoints.handle_error(err_t)
+      end
 
-  ["/upstreams/:upstreams/targets/:targets/healthy"] = {
-    POST = function(self, db)
-      return post_health(self, db, true)
-    end,
-  },
+      if not foreign_entity then
+        return endpoints.not_found()
+      end
 
-  ["/upstreams/:upstreams/targets/:targets/unhealthy"] = {
-    POST = function(self, db)
-      return post_health(self, db, false)
-    end,
-  },
+      self.params[schema.name] = schema:extract_pk_values(foreign_entity)
 
-  ["/upstreams/:upstreams/targets/:targets/:address/healthy"] = {
-    POST = function(self, db)
-      return post_health(self, db, true)
-    end,
-  },
+      local method = "page_for_upstream_raw"
+      local data, _, err_t, offset = endpoints.page_collection(self, db, schema, method)
+      if err_t then
+        return endpoints.handle_error(err_t)
+      end
 
-  ["/upstreams/:upstreams/targets/:targets/:address/unhealthy"] = {
-    POST = function(self, db)
-      return post_health(self, db, false)
-    end,
+      local foreign_key = self.params[foreign_schema.name]
+      local next_page = offset and fmt("/upstreams/%s/targets/all?offset=%s",
+                                       foreign_key,
+                                       escape_uri(offset)) or null
+
+      return kong.response.exit(200, {
+        data   = data,
+        offset = offset,
+        next   = next_page,
+      })
+    end
   },
 
   ["/upstreams/:upstreams/targets/:targets"] = {
@@ -244,3 +231,32 @@ return {
   },
 }
 
+-- upstream targets' healthcheck management is not available in the hybrid mode
+if kong.configuration.role ~= "control_plane" then
+  api_routes["/upstreams/:upstreams/targets/:targets/healthy"] = {
+    PUT = function(self, db)
+      return set_target_health(self, db, true)
+    end,
+  }
+
+  api_routes["/upstreams/:upstreams/targets/:targets/unhealthy"] = {
+    PUT = function(self, db)
+      return set_target_health(self, db, false)
+    end,
+  }
+
+  api_routes["/upstreams/:upstreams/targets/:targets/:address/healthy"] = {
+    PUT = function(self, db)
+      return set_target_health(self, db, true)
+    end,
+  }
+
+  api_routes["/upstreams/:upstreams/targets/:targets/:address/unhealthy"] = {
+    PUT = function(self, db)
+      return set_target_health(self, db, false)
+    end,
+  }
+
+end
+
+return api_routes

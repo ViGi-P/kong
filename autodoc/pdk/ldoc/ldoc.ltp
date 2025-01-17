@@ -44,8 +44,12 @@
 >   local buf = "" -- no access to table.concat or ldoc.tools.join, I'm forced to use a string
 >   local comma = ""
 >   local tp  = item:type_of_param(p)
->   if tp ~= '' then
->     buf = buf .. comma .. tp
+>   if tp and tp ~= '' then
+>     if tp:sub(1,1) ~= '`' and tp:sub(-1) ~= '`' then
+>       buf = buf .. comma .. '`' .. tp .. '`'
+>     else
+>       buf = buf .. comma .. tp
+>     end
 >     comma = ", "
 >   end
 >   local def = item:default_of_param(p)
@@ -76,9 +80,8 @@
 title: $(module.name)
 pdk: true
 toc: true
+source_url: https://github.com/Kong/kong/tree/master/kong/pdk
 ---
-
-## $(module.name == "PDK" and ldoc.title or module.name)
 
 $(module.summary) $(module.description)
 > for kind, items in module.kinds() do
@@ -89,7 +92,7 @@ $(module.kinds:get_section_description(kind))
 >     for item in items() do
 >       if not item.tags.redirect then -- skip redirects
 
-### $(display_name(item))
+## $(display_name(item))
 
 $(ldoc.descript(item))
 >         if ldoc.custom_tags then
@@ -143,7 +146,7 @@ $(ldoc.descript(item))
 >             for r in group:iter() do
 >               local type, ctypes = item:return_type(r);
 >               if type ~= '' then
->                 type = "`" .. type .. "`"
+>                 type = "`" .. type .. "`: "
 >               end
 $(list_prefix) $(type) $(r.text)
 
@@ -189,11 +192,6 @@ $(trim(usage))
 >           end -- for usage
 >         end -- if usage
 
->         if module.name == "PDK" then
-[Back to top](#plugin-development-kit)
->         else
-[Back to top](#$(ldoc.no_spaces(module.name):gsub("_", "")))
->         end
 >       end -- if not item.tags.redirect
 
 >     end -- for items

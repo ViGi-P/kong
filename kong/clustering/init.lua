@@ -1,69 +1,33 @@
 local _M = {}
+local _MT = { __index = _M, }
 
 
-local pl_file = require("pl.file")
 local pl_tablex = require("pl.tablex")
-local ssl = require("ngx.ssl")
-local openssl_x509 = require("resty.openssl.x509")
-local ngx_null = ngx.null
-local ngx_md5 = ngx.md5
-local tostring = tostring
+local clustering_utils = require("kong.clustering.utils")
+local events = require("kong.clustering.events")
+local clustering_tls = require("kong.clustering.tls")
+local wasm = require("kong.runloop.wasm")
+
+
 local assert = assert
-local error = error
-local concat = table.concat
 local sort = table.sort
-local type = type
 
 
-local MT = { __index = _M, }
+local is_dp_worker_process = clustering_utils.is_dp_worker_process
+local validate_client_cert = clustering_tls.validate_client_cert
+local get_cluster_cert = clustering_tls.get_cluster_cert
+local get_cluster_cert_key = clustering_tls.get_cluster_cert_key
+
+local setmetatable = setmetatable
+local ngx = ngx
+local ngx_log = ngx.log
+local ngx_var = ngx.var
+local kong = kong
+local ngx_exit = ngx.exit
+local ngx_ERR = ngx.ERR
 
 
-local compare_sorted_strings
-
-
-local function to_sorted_string(value)
-  if value == ngx_null then
-    return "/null/"
-  end
-
-  local t = type(value)
-  if t == "table" then
-    local i = 1
-    local o = { "{" }
-    for k, v in pl_tablex.sort(value, compare_sorted_strings) do
-      o[i+1] = to_sorted_string(k)
-      o[i+2] = ":"
-      o[i+3] = to_sorted_string(v)
-      o[i+4] = ";"
-      i=i+4
-    end
-    if i == 1 then
-      i = i + 1
-    end
-    o[i] = "}"
-
-    return concat(o, nil, 1, i)
-
-  elseif t == "string" then
-    return "$" .. value .. "$"
-
-  elseif t == "number" then
-    return "#" .. tostring(value) .. "#"
-
-  elseif t == "boolean" then
-    return "?" .. tostring(value) .. "?"
-
-  else
-    error("invalid type to be sorted (JSON types are supported")
-  end
-end
-
-
-compare_sorted_strings = function(a, b)
-  a = to_sorted_string(a)
-  b = to_sorted_string(b)
-  return a < b
-end
+local _log_prefix = "[clustering] "
 
 
 function _M.new(conf)
@@ -71,48 +35,95 @@ function _M.new(conf)
 
   local self = {
     conf = conf,
+    cert = assert(get_cluster_cert(conf)),
+    cert_key = assert(get_cluster_cert_key(conf)),
   }
 
-  setmetatable(self, MT)
-
-  -- note: pl_file.read throws error on failure so
-  -- no need for error checking
-  local cert = pl_file.read(conf.cluster_cert)
-  self.cert = assert(ssl.parse_pem_cert(cert))
-
-  cert = openssl_x509.new(cert, "PEM")
-  self.cert_digest = cert:digest("sha256")
-
-  local key = pl_file.read(conf.cluster_cert_key)
-  self.cert_key = assert(ssl.parse_pem_priv_key(key))
-
-  self.child = require("kong.clustering." .. conf.role).new(self)
+  setmetatable(self, _MT)
 
   return self
 end
 
 
-function _M:calculate_config_hash(config_table)
-  return ngx_md5(to_sorted_string(config_table))
+--- Validate the client certificate presented by the data plane.
+---
+--- If no certificate is passed in by the caller, it will be read from
+--- ngx.var.ssl_client_raw_cert.
+---
+---@param cert_pem? string # data plane cert text
+---
+---@return boolean? success
+---@return string?  error
+function _M:validate_client_cert(cert_pem)
+  -- XXX: do not refactor or change the call signature of this function without
+  -- reviewing the EE codebase first to sanity-check your changes
+  cert_pem = cert_pem or ngx_var.ssl_client_raw_cert
+  return validate_client_cert(self.conf, self.cert, cert_pem)
 end
 
 
 function _M:handle_cp_websocket()
-  return self.child:handle_cp_websocket()
+  local cert, err = self:validate_client_cert()
+  if not cert then
+    ngx_log(ngx_ERR, _log_prefix, err)
+    return ngx_exit(444)
+  end
+
+  return self.instance:handle_cp_websocket(cert)
+end
+
+
+function _M:init_cp_worker(basic_info)
+
+  events.init()
+
+  self.instance = require("kong.clustering.control_plane").new(self)
+  self.instance:init_worker(basic_info)
+end
+
+
+function _M:init_dp_worker(basic_info)
+  if not is_dp_worker_process() then
+    return
+  end
+
+  self.instance = require("kong.clustering.data_plane").new(self)
+  self.instance:init_worker(basic_info)
 end
 
 
 function _M:init_worker()
-  self.plugins_list = assert(kong.db.plugins:get_handlers())
-  sort(self.plugins_list, function(a, b)
+  local plugins_list = assert(kong.db.plugins:get_handlers())
+  sort(plugins_list, function(a, b)
     return a.name:lower() < b.name:lower()
   end)
 
-  self.plugins_list = pl_tablex.map(function(p)
+  plugins_list = pl_tablex.map(function(p)
     return { name = p.name, version = p.handler.VERSION, }
-  end, self.plugins_list)
+  end, plugins_list)
 
-  self.child:init_worker()
+  local filters = {}
+  if wasm.enabled() and wasm.filters then
+    for _, filter in ipairs(wasm.filters) do
+      filters[filter.name] = { name = filter.name }
+    end
+  end
+
+  local basic_info = {
+    plugins = plugins_list,
+    filters = filters,
+  }
+
+  local role = self.conf.role
+
+  if role == "control_plane" then
+    self:init_cp_worker(basic_info)
+    return
+  end
+
+  if role == "data_plane" then
+    self:init_dp_worker(basic_info)
+  end
 end
 
 

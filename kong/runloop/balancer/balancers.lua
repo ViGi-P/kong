@@ -1,9 +1,10 @@
 
 
 local upstreams = require "kong.runloop.balancer.upstreams"
-local targets = require "kong.runloop.balancer.targets"
+local targets
 local healthcheckers
-local dns_utils = require "resty.dns.utils"
+local dns_utils = require "kong.resty.dns.utils"
+local constants = require "kong.constants"
 
 local ngx = ngx
 local log = ngx.log
@@ -25,6 +26,7 @@ local DEBUG = ngx.DEBUG
 local TTL_0_RETRY = 60      -- Maximum life-time for hosts added with ttl=0, requery after it expires
 local REQUERY_INTERVAL = 30 -- Interval for requerying failed dns queries
 local SRV_0_WEIGHT = 1      -- SRV record with weight 0 should be hit minimally, hence we replace by 1
+local CLEAR_HEALTH_STATUS_DELAY = constants.CLEAR_HEALTH_STATUS_DELAY
 
 
 local balancers_M = {}
@@ -49,6 +51,7 @@ balancers_M.errors = setmetatable({
 
 
 function balancers_M.init()
+  targets = require "kong.runloop.balancer.targets"
   healthcheckers = require "kong.runloop.balancer.healthcheckers"
 end
 
@@ -89,6 +92,7 @@ local function wait(id)
   return nil, "timeout"
 end
 
+
 ------------------------------------------------------------------------------
 -- The mutually-exclusive section used internally by the
 -- 'create_balancer' operation.
@@ -98,9 +102,10 @@ local function create_balancer_exclusive(upstream)
   local health_threshold = upstream.healthchecks and
     upstream.healthchecks.threshold or nil
 
-  local targets_list, err = targets.fetch_targets(upstream)
+  targets.clean_targets_cache(upstream)
+  local targets_list = targets.fetch_targets(upstream)
   if not targets_list then
-    return nil, "failed fetching targets:" .. err
+    return nil, "failed fetching targets for upstream " .. upstream.name or upstream.id
   end
 
   if algorithm_types == nil then
@@ -108,6 +113,7 @@ local function create_balancer_exclusive(upstream)
       ["consistent-hashing"] = require("kong.runloop.balancer.consistent_hashing"),
       ["least-connections"] = require("kong.runloop.balancer.least_connections"),
       ["round-robin"] = require("kong.runloop.balancer.round_robin"),
+      ["latency"] = require("kong.runloop.balancer.latency"),
     }
   end
 
@@ -126,13 +132,14 @@ local function create_balancer_exclusive(upstream)
     ttl0Interval = opts.ttl0 or TTL_0_RETRY, -- refreshing ttl=0 records
     healthy = false, -- initial healthstatus of the balancer
     healthThreshold = health_threshold or 0, -- % healthy weight for overall balancer health
-    useSRVname = not not opts.useSRVname, -- force to boolean
+    useSRVname = upstream.use_srv_name,
   }, balancer_mt)
 
   for _, target in ipairs(targets_list) do
     target.balancer = balancer
   end
 
+  local err
   targets_list, err = targets.resolve_targets(targets_list)
   if not targets_list then
     return nil, "failed resolving targets:" .. err
@@ -175,7 +182,7 @@ function balancers_M.create_balancer(upstream, recreate)
   local existing_balancer = balancers_by_id[upstream.id]
   if existing_balancer then
     if recreate then
-      healthcheckers.stop_healthchecker(existing_balancer)
+      healthcheckers.stop_healthchecker(existing_balancer, CLEAR_HEALTH_STATUS_DELAY)
     else
       return existing_balancer
     end
@@ -224,7 +231,7 @@ function balancers_M.get_balancer(balancer_data, no_create)
     if no_create then
       return nil, "balancer not found"
     else
-      log(ERR, "balancer not found for ", upstream.name, ", will create it")
+      log(DEBUG, "balancer not found for ", upstream.name, ", will create it")
       return balancers_M.create_balancer(upstream), upstream
     end
   end
@@ -303,6 +310,9 @@ function balancer_mt:setAddressStatus(address, available)
   address.target.unavailableWeight = address.target.unavailableWeight + delta
   self.unavailableWeight = self.unavailableWeight + delta
   self:updateStatus()
+  if self.algorithm and self.algorithm.afterHostUpdate then
+    self.algorithm:afterHostUpdate()
+  end
   return true
 end
 
@@ -350,12 +360,6 @@ function balancer_mt:addAddress(target, entry)
   local entry_ip = entry.address or entry.target
   local entry_port = (entry.port ~= 0 and entry.port) or target.port
   local addresses = target.addresses
-  for _, addr in ipairs(addresses) do
-    if addr.ip == entry_ip and addr.port == entry_port then
-      -- already there, should we update something? add weights?
-      return
-    end
-  end
 
   local weight = entry.weight  -- this is nil for anything else than SRV
   if weight == 0 then
@@ -383,6 +387,14 @@ function balancer_mt:addAddress(target, entry)
   self.totalWeight = self.totalWeight + weight
   self:updateStatus()
 
+  if self.callback then
+    self:callback("added", addr, addr.ip, addr.port, addr.target.name, addr.hostHeader)
+  end
+
+  if self.algorithm and self.algorithm.afterHostUpdate then
+    self.algorithm:afterHostUpdate()
+  end
+
   return true
 end
 
@@ -407,6 +419,9 @@ function balancer_mt:changeWeight(target, entry, newWeight)
 
       addr.weight = newWeight
       self:updateStatus()
+      if self.algorithm and self.algorithm.afterHostUpdate then
+        self.algorithm:afterHostUpdate()
+      end
       return addr
     end
   end
@@ -422,10 +437,12 @@ function balancer_mt:deleteDisabledAddresses(target)
     local addr = addresses[i]
 
     if addr.disabled then
-    self:callback("removed", addr, addr.ip, addr.port,
-          target.name, addr.hostHeader)
-    dirty = true
-    table_remove(addresses, i)
+      if type(self.callback) == "function" then
+        self:callback("removed", addr, addr.ip, addr.port,
+                      target.name, addr.hostHeader)
+      end
+      dirty = true
+      table_remove(addresses, i)
     end
   end
 
@@ -546,11 +563,27 @@ end
 
 
 function balancer_mt:getPeer(...)
+  if not self.healthy then
+    return nil, "Balancer is unhealthy"
+  end
+
   if not self.algorithm or not self.algorithm.afterHostUpdate then
     return
   end
 
   return self.algorithm:getPeer(...)
+end
+
+function balancer_mt:afterBalance(...)
+  if not self.healthy then
+    return nil, "Balancer is unhealthy"
+  end
+
+  if not self.algorithm or not self.algorithm.afterBalance then
+    return
+  end
+
+  return self.algorithm:afterBalance(...)
 end
 
 return balancers_M

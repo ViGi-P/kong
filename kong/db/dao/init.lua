@@ -1,16 +1,19 @@
 local cjson = require "cjson"
 local iteration = require "kong.db.iteration"
-local utils = require "kong.tools.utils"
+local kong_table = require "kong.tools.table"
 local defaults = require "kong.db.strategies.connector".defaults
 local hooks = require "kong.hooks"
 local workspaces = require "kong.workspaces"
-
+local new_tab = require "table.new"
+local DAO_MAX_TTL = require("kong.constants").DATABASE.DAO_MAX_TTL
+local is_valid_uuid = require("kong.tools.uuid").is_valid_uuid
+local deep_copy     = require("kong.tools.table").deep_copy
 
 local setmetatable = setmetatable
 local tostring     = tostring
 local require      = require
-local ipairs       = ipairs
 local concat       = table.concat
+local insert       = table.insert
 local error        = error
 local pairs        = pairs
 local floor        = math.floor
@@ -21,19 +24,10 @@ local log          = ngx.log
 local fmt          = string.format
 local match        = string.match
 local run_hook     = hooks.run_hook
+local table_merge  = kong_table.table_merge
 
 
 local ERR          = ngx.ERR
-
-
-local new_tab
-do
-  local ok
-  ok, new_tab = pcall(require, "table.new")
-  if not ok then
-    new_tab = function() return {} end
-  end
-end
 
 
 local _M    = {}
@@ -162,10 +156,10 @@ local function get_pagination_options(self, options)
     error("options must be a table when specified", 3)
   end
 
-  options = utils.deep_copy(options, false)
+  options = kong_table.cycle_aware_deep_copy(options, true)
 
   if type(options.pagination) == "table" then
-    options.pagination = utils.table_merge(self.pagination, options.pagination)
+    options.pagination = table_merge(self.pagination, options.pagination)
 
   else
     options.pagination = self.pagination
@@ -181,7 +175,7 @@ local function validate_options_value(self, options)
 
   if options.workspace then
     if type(options.workspace) == "string" then
-      if not utils.is_valid_uuid(options.workspace) then
+      if not is_valid_uuid(options.workspace) then
         local ws = kong.db.workspaces:select_by_name(options.workspace)
         if ws then
           options.workspace = ws.id
@@ -202,10 +196,8 @@ local function validate_options_value(self, options)
   if schema.ttl == true and options.ttl ~= nil then
     if floor(options.ttl) ~= options.ttl or
                  options.ttl < 0 or
-                 options.ttl > 100000000 then
-      -- a bit over three years maximum to make it more safe against
-      -- integer overflow (time() + ttl)
-      errors.ttl = "must be an integer between 0 and 100000000"
+                 options.ttl > DAO_MAX_TTL then
+      errors.ttl = "must be an integer between 0 and " .. DAO_MAX_TTL
     end
 
   elseif schema.ttl ~= true and options.ttl ~= nil then
@@ -223,7 +215,7 @@ local function validate_options_value(self, options)
       end
     elseif #options.tags > 5 then
       errors.tags = "cannot query more than 5 tags"
-    elseif not match(concat(options.tags), "^[\033-\043\045\046\048-\126\128-\244]+$") then
+    elseif not match(concat(options.tags), "^[ \033-\043\045\046\048-\126\128-\244]+$") then
       errors.tags = "must only contain printable ascii (except `,` and `/`) or valid utf-8"
     elseif #options.tags > 1 and options.tags_cond ~= "and" and options.tags_cond ~= "or" then
       errors.tags_cond = "must be a either 'and' or 'or' when more than one tag is specified"
@@ -290,6 +282,18 @@ local function validate_options_value(self, options)
   if options.transform ~= nil then
     if type(options.transform) ~= "boolean" then
       errors.transform = "must be a boolean"
+    end
+  end
+
+  if options.export ~= nil then
+    if type(options.export) ~= "boolean" then
+      errors.export = "must be a boolean"
+    end
+  end
+
+  if options.skip_ttl ~= nil then
+    if type(options.skip_ttl) ~= "boolean" then
+      errors.skip_ttl = "must be a boolean"
     end
   end
 
@@ -486,16 +490,14 @@ end
 
 
 local function check_update(self, key, entity, options, name)
-
-  local transform
-  if options ~= nil then
-    local ok, errors = validate_options_value(self, options)
-    if not ok then
-      local err_t = self.errors:invalid_options(errors)
-      return nil, nil, tostring(err_t), err_t
-    end
-    transform = options.transform
+  options = options or {}
+  local ok, errors = validate_options_value(self, options)
+  if not ok then
+    local err_t = self.errors:invalid_options(errors)
+    return nil, nil, tostring(err_t), err_t
   end
+  local transform = options.transform
+
 
   if transform == nil then
     transform = true
@@ -511,9 +513,13 @@ local function check_update(self, key, entity, options, name)
   local rbw_entity
   local err, err_t
   if name then
-     rbw_entity, err, err_t = self["select_by_" .. name](self, key, options)
+    options.hide_shorthands = true
+    rbw_entity, err, err_t = self["select_by_" .. name](self, key, options)
+    options.hide_shorthands = false
   else
-     rbw_entity, err, err_t = self:select(key, options)
+    options.hide_shorthands = true
+    rbw_entity, err, err_t = self:select(key, options)
+    options.hide_shorthands = false
   end
   if err then
     return nil, nil, err, err_t
@@ -568,7 +574,7 @@ local function check_upsert(self, key, entity, options, name)
     local ok, errors = validate_options_value(self, options)
     if not ok then
       local err_t = self.errors:invalid_options(errors)
-      return nil, tostring(err_t), err_t
+      return nil, nil, tostring(err_t), err_t
     end
     transform = options.transform
   end
@@ -630,11 +636,17 @@ local function check_upsert(self, key, entity, options, name)
 end
 
 
-local function find_cascade_delete_entities(self, entity, show_ws_id)
-  local constraints = self.schema:get_constraints()
-  local entries = {}
+local function recursion_over_constraints(self, entity, show_ws_id, entries, c)
+  local constraints = c and c.schema:get_constraints()
+                      or self.schema:get_constraints()
+
+  if #constraints == 0 then
+    return
+  end
+
   local pk = self.schema:extract_pk_values(entity)
-  for _, constraint in ipairs(constraints) do
+  for i = 1, #constraints do
+    local constraint = constraints[i]
     if constraint.on_delete == "cascade" then
       local dao = self.db.daos[constraint.schema.name]
       local method = "each_for_" .. constraint.field_name
@@ -643,8 +655,10 @@ local function find_cascade_delete_entities(self, entity, show_ws_id)
           log(ERR, "[db] failed to traverse entities for cascade-delete: ", err)
           break
         end
-        
-        table.insert(entries, { dao = dao, entity = row })
+
+        insert(entries, { dao = dao, entity = row })
+
+        recursion_over_constraints(self, row, show_ws_id, entries, constraint)
       end
     end
   end
@@ -653,9 +667,20 @@ local function find_cascade_delete_entities(self, entity, show_ws_id)
 end
 
 
+local function find_cascade_delete_entities(self, entity, show_ws_id)
+  local entries = {}
+
+  recursion_over_constraints(self, entity, show_ws_id, entries)
+
+  return entries
+end
+-- for unit tests only
+_M._find_cascade_delete_entities = find_cascade_delete_entities
+
+
 local function propagate_cascade_delete_events(entries, options)
-  for _, entry in ipairs(entries) do
-    entry.dao:post_crud_event("delete", entry.entity, nil, options)
+  for i = 1, #entries do
+    entries[i].dao:post_crud_event("delete", entries[i].entity, nil, options)
   end
 end
 
@@ -789,12 +814,14 @@ local function generate_foreign_key_methods(schema)
         local entity_to_update, rbw_entity, err, err_t = check_update(self, unique_value,
                                                                       entity, options, name)
         if not entity_to_update then
+          run_hook("dao:update_by:fail", err_t, entity_to_update, self.schema.name, options)
           return nil, err, err_t
         end
 
         local row, err_t = self.strategy:update_by_field(name, unique_value,
                                                          entity_to_update, options)
         if not row then
+          run_hook("dao:update_by:fail", err_t, entity_to_update, self.schema.name, options)
           return nil, tostring(err_t), err_t
         end
 
@@ -844,12 +871,14 @@ local function generate_foreign_key_methods(schema)
         local row, err_t = self.strategy:upsert_by_field(name, unique_value,
                                                          entity_to_upsert, options)
         if not row then
+          run_hook("dao:upsert_by:fail", err_t, entity_to_upsert, self.schema.name, options)
           return nil, tostring(err_t), err_t
         end
 
         local ws_id = row.ws_id
         row, err, err_t = self:row_to_entity(row, options)
         if not row then
+          run_hook("dao:upsert_by:fail", err_t, entity_to_upsert, self.schema.name, options)
           return nil, err, err_t
         end
 
@@ -878,8 +907,9 @@ local function generate_foreign_key_methods(schema)
           return nil, err, err_t
         end
 
-        local show_ws_id = { show_ws_id = true }
-        local entity, err, err_t = self["select_by_" .. name](self, unique_value, show_ws_id)
+        local select_options = deep_copy(options or {})
+        select_options["show_ws_id"] = true
+        local entity, err, err_t = self["select_by_" .. name](self, unique_value, select_options)
         if err then
           return nil, err, err_t
         end
@@ -888,7 +918,7 @@ local function generate_foreign_key_methods(schema)
           return true
         end
 
-        local cascade_entries = find_cascade_delete_entities(self, entity, show_ws_id)
+        local cascade_entries = find_cascade_delete_entities(self, entity, select_options)
 
         local ok, err_t = run_hook("dao:delete_by:pre",
                                    entity,
@@ -899,10 +929,15 @@ local function generate_foreign_key_methods(schema)
           return nil, tostring(err_t), err_t
         end
 
-        local _
-        _, err_t = self.strategy:delete_by_field(name, unique_value, options)
+        local rows_affected
+        rows_affected, err_t = self.strategy:delete_by_field(name, unique_value, options)
         if err_t then
+          run_hook("dao:delete_by:fail", err_t, entity, self.schema.name, options)
           return nil, tostring(err_t), err_t
+
+        elseif not rows_affected then
+          run_hook("dao:delete_by:post", nil, self.schema.name, options, entity.ws_id, nil)
+          return nil
         end
 
         entity, err_t = run_hook("dao:delete_by:post",
@@ -931,12 +966,17 @@ function _M.new(db, schema, strategy, errors)
   local fk_methods = generate_foreign_key_methods(schema)
   local super      = setmetatable(fk_methods, DAO)
 
+  local pagination = strategy.connector and
+                     type(strategy.connector) == "table" and
+                     strategy.connector.defaults.pagination or
+                     defaults.pagination
+
   local self = {
     db         = db,
     schema     = schema,
     strategy   = strategy,
     errors     = errors,
-    pagination = utils.shallow_copy(defaults.pagination),
+    pagination = kong_table.shallow_copy(pagination),
     super      = super,
   }
 
@@ -956,13 +996,14 @@ function DAO:truncate()
 end
 
 
-function DAO:select(primary_key, options)
-  validate_primary_key_type(primary_key)
+function DAO:select(pk_or_entity, options)
+  validate_primary_key_type(pk_or_entity)
 
   if options ~= nil then
     validate_options_type(options)
   end
 
+  local primary_key = self.schema:extract_pk_values(pk_or_entity)
   local ok, errors = self.schema:validate_primary_key(primary_key)
   if not ok then
     local err_t = self.errors:invalid_primary_key(errors)
@@ -1092,6 +1133,21 @@ function DAO:each(size, options)
 end
 
 
+function DAO:each_for_export(size, options)
+  if self.strategy.schema.ttl then
+    if not options then
+      options = get_pagination_options(self, options)
+    else
+      options = kong_table.cycle_aware_deep_copy(options, true)
+    end
+
+    options.export = true
+  end
+
+  return self:each(size, options)
+end
+
+
 function DAO:insert(entity, options)
   validate_entity_type(entity)
 
@@ -1111,12 +1167,14 @@ function DAO:insert(entity, options)
 
   local row, err_t = self.strategy:insert(entity_to_insert, options)
   if not row then
+    run_hook("dao:insert:fail", err_t, entity, self.schema.name, options)
     return nil, tostring(err_t), err_t
   end
 
   local ws_id = row.ws_id
   row, err, err_t = self:row_to_entity(row, options)
   if not row then
+    run_hook("dao:insert:fail", err, entity, self.schema.name, options)
     return nil, err, err_t
   end
 
@@ -1131,14 +1189,15 @@ function DAO:insert(entity, options)
 end
 
 
-function DAO:update(primary_key, entity, options)
-  validate_primary_key_type(primary_key)
+function DAO:update(pk_or_entity, entity, options)
+  validate_primary_key_type(pk_or_entity)
   validate_entity_type(entity)
 
   if options ~= nil then
     validate_options_type(options)
   end
 
+  local primary_key = self.schema:extract_pk_values(pk_or_entity)
   local ok, errors = self.schema:validate_primary_key(primary_key)
   if not ok then
     local err_t = self.errors:invalid_primary_key(errors)
@@ -1163,12 +1222,14 @@ function DAO:update(primary_key, entity, options)
 
   local row, err_t = self.strategy:update(primary_key, entity_to_update, options)
   if not row then
+    run_hook("dao:update:fail", err_t, entity_to_update, self.schema.name, options)
     return nil, tostring(err_t), err_t
   end
 
   local ws_id = row.ws_id
   row, err, err_t = self:row_to_entity(row, options)
   if not row then
+    run_hook("dao:update:fail", err_t, entity_to_update, self.schema.name, options)
     return nil, err, err_t
   end
 
@@ -1183,14 +1244,15 @@ function DAO:update(primary_key, entity, options)
 end
 
 
-function DAO:upsert(primary_key, entity, options)
-  validate_primary_key_type(primary_key)
+function DAO:upsert(pk_or_entity, entity, options)
+  validate_primary_key_type(pk_or_entity)
   validate_entity_type(entity)
 
   if options ~= nil then
     validate_options_type(options)
   end
 
+  local primary_key = self.schema:extract_pk_values(pk_or_entity)
   local ok, errors = self.schema:validate_primary_key(primary_key)
   if not ok then
     local err_t = self.errors:invalid_primary_key(errors)
@@ -1240,21 +1302,23 @@ function DAO:upsert(primary_key, entity, options)
 end
 
 
-function DAO:delete(primary_key, options)
-  validate_primary_key_type(primary_key)
+function DAO:delete(pk_or_entity, options)
+  validate_primary_key_type(pk_or_entity)
 
   if options ~= nil then
     validate_options_type(options)
   end
 
+  local primary_key = self.schema:extract_pk_values(pk_or_entity)
   local ok, errors = self.schema:validate_primary_key(primary_key)
   if not ok then
     local err_t = self.errors:invalid_primary_key(errors)
     return nil, tostring(err_t), err_t
   end
 
-  local show_ws_id = { show_ws_id = true }
-  local entity, err, err_t = self:select(primary_key, show_ws_id)
+  local select_options = deep_copy(options or {})
+  select_options["show_ws_id"] = true
+  local entity, err, err_t = self:select(primary_key, select_options)
   if err then
     return nil, err, err_t
   end
@@ -1271,7 +1335,7 @@ function DAO:delete(primary_key, options)
     end
   end
 
-  local cascade_entries = find_cascade_delete_entities(self, primary_key, show_ws_id)
+  local cascade_entries = find_cascade_delete_entities(self, primary_key, select_options)
 
   local ws_id = entity.ws_id
   local _
@@ -1285,10 +1349,15 @@ function DAO:delete(primary_key, options)
     return nil, tostring(err_t), err_t
   end
 
-  local _
-  _, err_t = self.strategy:delete(primary_key, options)
+  local rows_affected
+  rows_affected, err_t = self.strategy:delete(primary_key, options)
   if err_t then
+    run_hook("dao:delete:fail", err_t, entity, self.schema.name, options)
     return nil, tostring(err_t), err_t
+
+  elseif not rows_affected then
+    run_hook("dao:delete:post", nil, self.schema.name, options, ws_id, nil)
+    return nil
   end
 
   entity, err_t = run_hook("dao:delete:post", entity, self.schema.name, options, ws_id, cascade_entries)
@@ -1394,27 +1463,27 @@ function DAO:row_to_entity(row, options)
 
   local ws_id = row.ws_id
 
-  local entity, errors = self.schema:process_auto_fields(row, "select", nulls)
-  if not entity then
-    local err_t = self.errors:schema_violation(errors)
-    return nil, tostring(err_t), err_t
-  end
-
+  local transformed_entity
   if transform then
     local err
-    entity, err = self.schema:transform(entity, row, "select")
-    if not entity then
+    transformed_entity, err = self.schema:transform(row, nil, "select")
+    if not transformed_entity then
       local err_t = self.errors:transformation_error(err)
       return nil, tostring(err_t), err_t
     end
   end
 
-  if options and options.show_ws_id then
-    entity.ws_id = ws_id
+  local entity, errors = self.schema:process_auto_fields(transformed_entity or row, "select", nulls, options)
+  if not entity then
+    local err_t = self.errors:schema_violation(errors)
+    return nil, tostring(err_t), err_t
+  end
 
-    -- special behavior for blue-green migrations
-    if self.schema.workspaceable and ws_id == null or ws_id == nil then
-      entity.ws_id = kong.default_workspace
+  if options and options.show_ws_id and self.schema.workspaceable then
+    if ws_id == null or ws_id == nil then
+      entity.ws_id = kong.default_workspace -- special behavior for blue-green migrations
+    else
+      entity.ws_id = ws_id
     end
   end
 
@@ -1430,12 +1499,12 @@ function DAO:post_crud_event(operation, entity, old_entity, options)
   if self.events then
     local entity_without_nulls
     if entity then
-      entity_without_nulls = remove_nulls(utils.deep_copy(entity, false))
+      entity_without_nulls = remove_nulls(kong_table.cycle_aware_deep_copy(entity, true))
     end
 
     local old_entity_without_nulls
     if old_entity then
-      old_entity_without_nulls = remove_nulls(utils.deep_copy(old_entity, false))
+      old_entity_without_nulls = remove_nulls(kong_table.cycle_aware_deep_copy(old_entity, true))
     end
 
     local ok, err = self.events.post_local("dao:crud", operation, {
@@ -1451,10 +1520,29 @@ function DAO:post_crud_event(operation, entity, old_entity, options)
 end
 
 
-function DAO:cache_key(key, arg2, arg3, arg4, arg5, ws_id)
+local function get_cache_key_value(name, key, fields)
+  local value = key[name]
+  if value == null or value == nil then
+    return
+  end
 
-  if self.schema.workspaceable then
-    ws_id = ws_id or workspaces.get_workspace_id()
+  if type(value) == "table" and fields[name].type == "foreign" then
+    value = value.id -- FIXME extract foreign key, do not assume `id`
+    if value == null or value == nil then
+      return
+    end
+  end
+
+  return tostring(value)
+end
+
+
+function DAO:cache_key(key, arg2, arg3, arg4, arg5, ws_id)
+  local schema = self.schema
+  local name = schema.name
+
+  if (ws_id == nil or ws_id == null) and schema.workspaceable then
+    ws_id = workspaces.get_workspace_id()
   end
 
   -- Fast path: passing the cache_key/primary_key entries in
@@ -1462,13 +1550,13 @@ function DAO:cache_key(key, arg2, arg3, arg4, arg5, ws_id)
   -- the generic code below, but building the cache key
   -- becomes a single string.format operation
   if type(key) == "string" then
-    return fmt("%s:%s:%s:%s:%s:%s:%s", self.schema.name,
-               key == nil and "" or key,
-               arg2 == nil and "" or arg2,
-               arg3 == nil and "" or arg3,
-               arg4 == nil and "" or arg4,
-               arg5 == nil and "" or arg5,
-               ws_id == nil and "" or ws_id)
+    return fmt("%s:%s:%s:%s:%s:%s:%s", name,
+              (key   == nil or key   == null) and "" or key,
+              (arg2  == nil or arg2  == null) and "" or arg2,
+              (arg3  == nil or arg3  == null) and "" or arg3,
+              (arg4  == nil or arg4  == null) and "" or arg4,
+              (arg5  == nil or arg5  == null) and "" or arg5,
+              (ws_id == nil or ws_id == null) and "" or ws_id)
   end
 
   -- Generic path: build the cache key from the fields
@@ -1478,27 +1566,38 @@ function DAO:cache_key(key, arg2, arg3, arg4, arg5, ws_id)
     error("key must be a string or an entity table", 2)
   end
 
-  if key.ws_id then
+  if key.ws_id ~= nil and key.ws_id ~= null and schema.workspaceable then
     ws_id = key.ws_id
   end
 
   local values = new_tab(7, 0)
-  values[1] = self.schema.name
-  local source = self.schema.cache_key or self.schema.primary_key
+  values[1] = name
 
   local i = 2
-  for _, name in ipairs(source) do
-    local field = self.schema.fields[name]
-    local value = key[name]
-    if value == null or value == nil then
-      value = ""
-    elseif field.type == "foreign" then
-      -- FIXME extract foreign key, do not assume `id`
-      value = value.id
+
+  local fields = schema.fields
+  local source = schema.cache_key
+  local use_pk = true
+  if source then
+    for j = 1, #source do
+      local value = get_cache_key_value(source[j], key, fields)
+      if value ~= nil then
+        use_pk = false
+      end
+      values[i] = value or ""
+      i = i + 1
     end
-    values[i] = tostring(value)
-    i = i + 1
   end
+
+  if use_pk then
+    i = 2
+    source = schema.primary_key
+    for j = 1, #source do
+      values[i] = get_cache_key_value(source[j], key, fields) or ""
+      i = i + 1
+    end
+  end
+
   for n = i, 6 do
     values[n] = ""
   end

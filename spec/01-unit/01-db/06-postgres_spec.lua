@@ -145,6 +145,9 @@ describe("kong.db [#postgres] connector", function()
           end
         end)
 
+        -- we are running in timer and semaphore needs some time to pass
+        ngx.update_time()
+
         local co2 = ngx.thread.spawn(function()
           local _, err = connector:query(0.001)
           if err then
@@ -266,7 +269,7 @@ describe("kong.db [#postgres] connector", function()
     local ts = connector._get_topologically_sorted_table_names
 
     it("prepends cluster_events no matter what", function()
-      assert.same({"cluster_events"},  ts({}))
+      assert.same({"cluster_events", "clustering_rpc_requests"},  ts({}))
     end)
 
     it("sorts an array of unrelated schemas alphabetically by name", function()
@@ -274,7 +277,7 @@ describe("kong.db [#postgres] connector", function()
       local b = schema_new({ name = "b", ttl = true, fields = {} })
       local c = schema_new({ name = "c", ttl = true, fields = {} })
 
-      assert.same({"cluster_events", "a", "b", "c"},  ts({ c, a, b }))
+      assert.same({"cluster_events", "clustering_rpc_requests", "a", "b", "c"},  ts({ c, a, b }))
     end)
 
     it("ignores non-ttl schemas", function()
@@ -282,7 +285,7 @@ describe("kong.db [#postgres] connector", function()
       local b = schema_new({ name = "b", fields = {} })
       local c = schema_new({ name = "c", ttl = true, fields = {} })
 
-      assert.same({"cluster_events", "a", "c"},  ts({ c, a, b }))
+      assert.same({"cluster_events", "clustering_rpc_requests", "a", "c"},  ts({ c, a, b }))
     end)
 
     it("it puts destinations first", function()
@@ -303,14 +306,14 @@ describe("kong.db [#postgres] connector", function()
         }
       })
 
-      assert.same({"cluster_events", "a", "c", "b"},  ts({ a, b, c }))
+      assert.same({"cluster_events", "clustering_rpc_requests", "a", "c", "b"},  ts({ a, b, c }))
     end)
 
     it("puts core entities first, even when no relations", function()
       local a = schema_new({ name = "a", ttl = true, fields = {} })
       local routes = schema_new({ name = "routes", ttl = true, fields = {} })
 
-      assert.same({"cluster_events", "routes", "a"},  ts({ a, routes }))
+      assert.same({"cluster_events", "clustering_rpc_requests", "routes", "a"},  ts({ a, routes }))
     end)
 
     it("puts workspaces before core and others, when no relations", function()
@@ -318,7 +321,7 @@ describe("kong.db [#postgres] connector", function()
       local workspaces = schema_new({ name = "workspaces", ttl = true, fields = {} })
       local routes = schema_new({ name = "routes", ttl = true, fields = {} })
 
-      assert.same({"cluster_events", "workspaces", "routes", "a"},  ts({ a, routes, workspaces }))
+      assert.same({"cluster_events", "clustering_rpc_requests", "workspaces", "routes", "a"},  ts({ a, routes, workspaces }))
     end)
 
     it("puts workspaces first, core entities second, and other entities afterwards, even with relations", function()
@@ -340,7 +343,7 @@ describe("kong.db [#postgres] connector", function()
         }
       })
       local workspaces = schema_new({ name = "workspaces", ttl = true, fields = {} })
-      assert.same({ "cluster_events", "workspaces", "services", "routes", "a", "b" },
+      assert.same({ "cluster_events", "clustering_rpc_requests", "workspaces", "services", "routes", "a", "b" },
                   ts({ services, b, a, workspaces, routes }))
     end)
 
@@ -355,7 +358,7 @@ describe("kong.db [#postgres] connector", function()
         { a = { type = "foreign", reference = "a" } } -- we somehow forced workspaces to depend on a
       } })
 
-      assert.same({ "cluster_events", "a", "workspaces", "services" },  ts({ services, a, workspaces }))
+      assert.same({ "cluster_events", "clustering_rpc_requests", "a", "workspaces", "services" },  ts({ services, a, workspaces }))
     end)
 
     it("returns an error if cycles are found", function()

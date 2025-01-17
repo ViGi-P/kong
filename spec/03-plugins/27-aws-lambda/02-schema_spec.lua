@@ -79,15 +79,18 @@ describe("Plugin: AWS Lambda (schema)", function()
     assert.falsy(ok)
   end)
 
-  it("errors if proxy_scheme is missing while proxy_url is provided", function()
-    local ok, err = v({
-      proxy_url = "http://hello.com/proxy",
-      aws_region = "us-east-1",
-      function_name = "my-function"
-    }, schema_def)
+  it("errors with a non-http proxy_url", function()
+    for _, scheme in ipairs({"https", "ftp", "wss"}) do
+      local ok, err = v({
+        proxy_url = scheme .. "://squid:3128",
+        aws_region = "us-east-1",
+        function_name = "my-function"
+      }, schema_def)
 
-    assert.equal("all or none of these fields must be set: 'config.proxy_scheme', 'config.proxy_url'", err["@entity"][1])
-    assert.falsy(ok)
+      assert.not_nil(err)
+      assert.falsy(ok)
+      assert.equals("proxy_url scheme must be http", err["@entity"][1])
+    end
   end)
 
   it("accepts a host", function()
@@ -100,25 +103,23 @@ describe("Plugin: AWS Lambda (schema)", function()
     assert.truthy(ok)
   end)
 
-  it("errors if none of aws_region and host are passed ", function()
+  it("does not error if none of aws_region and host are passed (tries to autodetect on runtime)", function()
     local ok, err = v({
       function_name = "my-function"
     }, schema_def)
 
-
-    assert.equal("only one of these fields must be non-empty: 'config.aws_region', 'config.host'", err["@entity"][1])
-    assert.falsy(ok)
+    assert.is_nil(err)
+    assert.truthy(ok)
   end)
 
-  it("errors if both of aws_region and host are passed ", function()
+  it("allow both of aws_region and host to be passed", function()
     local ok, err = v({
       host = "my.lambda.host",
       aws_region = "us-east-1",
       function_name = "my-function"
     }, schema_def)
 
-
-    assert.equal("only one of these fields must be non-empty: 'config.aws_region', 'config.host'", err["@entity"][1])
-    assert.falsy(ok)
+    assert.is_nil(err)
+    assert.truthy(ok)
   end)
 end)

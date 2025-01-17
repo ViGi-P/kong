@@ -8,32 +8,13 @@ return {
     { config = {
         type = "record",
         fields = {
-          { allow = {
-              type = "array",
+          { allow = { description = "An array of regular expressions that should be allowed. The regular expressions will be checked against the `User-Agent` header.", type = "array",
               elements = { type = "string", is_regex = true },
               default = {},
           }, },
-          { deny = {
-              type = "array",
+          { deny = { description = "An array of regular expressions that should be denied. The regular expressions will be checked against the `User-Agent` header.", type = "array",
               elements = { type = "string", is_regex = true },
               default = {},
-          }, },
-        },
-        shorthand_fields = {
-          -- deprecated forms, to be removed in Kong 3.0
-          { blacklist = {
-              type = "array",
-              elements = { type = "string", is_regex = true },
-              func = function(value)
-                return { deny = value }
-              end,
-          }, },
-          { whitelist = {
-              type = "array",
-              elements = { type = "string", is_regex = true },
-              func = function(value)
-                return { allow = value }
-              end,
           }, },
         },
     }, },

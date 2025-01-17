@@ -19,7 +19,7 @@ for _, strategy in helpers.each_strategy() do
       })
 
       local route = bp.routes:insert {
-        hosts = { "tcp_logging.com" },
+        hosts = { "tcp_logging.test" },
       }
 
       bp.plugins:insert {
@@ -45,7 +45,7 @@ for _, strategy in helpers.each_strategy() do
 
 
       local route2 = bp.routes:insert {
-        hosts = { "tcp_logging_tls.com" },
+        hosts = { "tcp_logging_tls.test" },
       }
 
       bp.plugins:insert {
@@ -60,7 +60,7 @@ for _, strategy in helpers.each_strategy() do
 
       local grpc_service = assert(bp.services:insert {
         name = "grpc-service",
-        url = "grpc://localhost:15002",
+        url = helpers.grpcbin_url,
       })
 
       local route3 = assert(bp.routes:insert {
@@ -80,7 +80,7 @@ for _, strategy in helpers.each_strategy() do
 
       local grpcs_service = assert(bp.services:insert {
         name = "grpcs-service",
-        url = "grpcs://localhost:15003",
+        url = helpers.grpcbin_ssl_url,
       })
 
       local route4 = assert(bp.routes:insert {
@@ -99,7 +99,7 @@ for _, strategy in helpers.each_strategy() do
       }
 
       local route5 = bp.routes:insert {
-        hosts = { "early_termination.example.com" },
+        hosts = { "early_termination.example.test" },
       }
 
       bp.plugins:insert {
@@ -174,7 +174,7 @@ for _, strategy in helpers.each_strategy() do
       }
 
       local route6 = bp.routes:insert {
-        hosts = { "custom_tcp_logging.com" },
+        hosts = { "custom_tcp_logging.test" },
       }
 
       bp.plugins:insert {
@@ -219,7 +219,7 @@ for _, strategy in helpers.each_strategy() do
         method  = "GET",
         path    = "/request",
         headers = {
-          host  = "tcp_logging.com",
+          host  = "tcp_logging.test",
         },
       })
       assert.response(r).has.status(200)
@@ -246,7 +246,7 @@ for _, strategy in helpers.each_strategy() do
           method  = "GET",
           path    = "/request",
           headers = {
-            host  = "custom_tcp_logging.com",
+            host  = "custom_tcp_logging.test",
           },
         })
         assert.response(r).has.status(200)
@@ -272,7 +272,7 @@ for _, strategy in helpers.each_strategy() do
           method  = "GET",
           path    = "/request",
           headers = {
-            host  = "custom_tcp_logging.com",
+            host  = "custom_tcp_logging.test",
           },
         })
         assert.response(r).has.status(200)
@@ -329,7 +329,7 @@ for _, strategy in helpers.each_strategy() do
         method  = "GET",
         path    = "/delay/1",
         headers = {
-          host  = "tcp_logging.com",
+          host  = "tcp_logging.test",
         },
       })
 
@@ -391,7 +391,7 @@ for _, strategy in helpers.each_strategy() do
       assert.True(is_latencies_sum_adding_up)
     end)
 
-    it("logs proper latencies (#grpcs) #flaky", function()
+    it("logs proper latencies (#grpcs)", function()
       local tcp_thread = helpers.tcp_server(TCP_PORT) -- Starting the mock TCP server
 
       -- Making the request
@@ -402,6 +402,7 @@ for _, strategy in helpers.each_strategy() do
         },
         opts = {
           ["-authority"] = "tcp_logging_grpcs.test",
+          ["-H"] = "'Content-Type: text/plain'",
         }
       })
       assert.truthy(ok)
@@ -436,7 +437,7 @@ for _, strategy in helpers.each_strategy() do
         method  = "GET",
         path    = "/request",
         headers = {
-          host = "tcp_logging_tls.com",
+          host = "tcp_logging_tls.test",
         },
       })
       assert.response(r).has.status(200)
@@ -459,7 +460,7 @@ for _, strategy in helpers.each_strategy() do
         method  = "GET",
         path    = "/request",
         headers = {
-          host  = "tcp_logging.com",
+          host  = "tcp_logging.test",
         },
       })
 
@@ -472,7 +473,7 @@ for _, strategy in helpers.each_strategy() do
 
       -- Making sure it's alright
       local log_message = cjson.decode(res)
-      assert.equal("TLSv1.2", log_message.request.tls.version)
+      assert.equal("TLSv1.3", log_message.request.tls.version)
       assert.is_string(log_message.request.tls.cipher)
       assert.equal("NONE", log_message.request.tls.client_verify)
     end)
@@ -485,7 +486,7 @@ for _, strategy in helpers.each_strategy() do
         method  = "GET",
         path    = "/request",
         headers = {
-          host  = "tcp_logging.com",
+          host  = "tcp_logging.test",
           ["x-ssl-client-verify"] = "SUCCESS",
         },
       })
@@ -499,7 +500,7 @@ for _, strategy in helpers.each_strategy() do
 
       -- Making sure it's alright
       local log_message = cjson.decode(res)
-      assert.equal("TLSv1.2", log_message.request.tls.version)
+      assert.equal("TLSv1.3", log_message.request.tls.version)
       assert.is_string(log_message.request.tls.cipher)
       assert.equal("SUCCESS", log_message.request.tls.client_verify)
     end)
@@ -542,7 +543,7 @@ for _, strategy in helpers.each_strategy() do
         method  = "GET",
         path    = "/request",
         headers = {
-          host  = "early_termination.example.com",
+          host  = "early_termination.example.test",
         },
       })
       assert.response(r).has.status(200)

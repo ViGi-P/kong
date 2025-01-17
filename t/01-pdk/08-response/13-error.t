@@ -1,7 +1,7 @@
 use strict;
 use warnings FATAL => 'all';
 use Test::Nginx::Socket::Lua;
-use t::Util;
+do "./t/Util.pm";
 
 $ENV{TEST_NGINX_NXSOCK} ||= html_dir();
 
@@ -16,6 +16,10 @@ __DATA__
 --- config
     location = /t {
         content_by_lua_block {
+            kong = {
+              configuration = {},
+            }
+
             local PDK = require "kong.pdk"
             local pdk = PDK.new()
             return pdk.response.error(502)
@@ -29,10 +33,11 @@ Accept: application/json
 --- error_code: 502
 --- response_headers_like
 Content-Type: application/json; charset=utf-8
---- response_body chop
-{
-  "message":"An invalid response was received from the upstream server"
-}
+--- response_body eval
+qr/{
+\s*"message":"An invalid response was received from the upstream server",
+\s*"request_id":".*"
+}/
 --- no_error_log
 [error]
 
@@ -43,6 +48,10 @@ Content-Type: application/json; charset=utf-8
 --- config
     location = /t {
         content_by_lua_block {
+            kong = {
+              configuration = {},
+            }
+
             local PDK = require "kong.pdk"
             local pdk = PDK.new()
             return pdk.response.error(400)
@@ -54,20 +63,57 @@ GET /t
 --- error_code: 400
 --- response_headers_like
 Content-Type: application/json; charset=utf-8
---- response_body chop
-{
-  "message":"Bad request"
-}
+--- response_body eval
+qr/{
+\s*"message":"Bad request",
+\s*"request_id":".*"
+}/
 --- no_error_log
 [error]
 
 
 
-=== TEST 3: service.response.error() may ignore accept header
+=== TEST 3: service.response.error() fallbacks to json with unknown mime type, fix #7746
 --- http_config eval: $t::Util::HttpConfig
 --- config
     location = /t {
         content_by_lua_block {
+            kong = {
+              configuration = {},
+            }
+
+            local PDK = require "kong.pdk"
+            local pdk = PDK.new()
+            return pdk.response.error(400)
+        }
+    }
+
+--- request
+GET /t
+--- more_headers
+Accept: json
+--- error_code: 400
+--- response_headers_like
+Content-Type: application/json; charset=utf-8
+--- response_body eval
+qr/{
+\s*"message":"Bad request",
+\s*"request_id":".*"
+}/
+--- no_error_log
+[error]
+
+
+
+=== TEST 4: service.response.error() may ignore accept header
+--- http_config eval: $t::Util::HttpConfig
+--- config
+    location = /t {
+        content_by_lua_block {
+            kong = {
+              configuration = {},
+            }
+
             local PDK = require "kong.pdk"
             local pdk = PDK.new()
             local headers = {
@@ -85,21 +131,25 @@ Accept: application/json
 --- error_code: 503
 --- response_headers_like
 Content-Type: application/xml
---- response_body
-<?xml version="1.0" encoding="UTF-8"?>
-<error>
-  <message>this is fine</message>
-</error>
+--- response_body eval
+qr/<\?xml version="1\.0" encoding="UTF\-8"\?>\n<error>
+\s*<message>this is fine<\/message>
+\s*<requestid>.*<\/requestid>
+<\/error>/
 --- no_error_log
 [error]
 
 
 
-=== TEST 4: service.response.error() respects accept header priorities
+=== TEST 5: service.response.error() respects accept header priorities
 --- http_config eval: $t::Util::HttpConfig
 --- config
     location = /t {
         content_by_lua_block {
+            kong = {
+              configuration = {},
+            }
+
             local PDK = require "kong.pdk"
             local pdk = PDK.new()
             return pdk.response.error(502)
@@ -113,30 +163,35 @@ Accept: text/plain;q=0.3, text/html;q=0.7, text/html;level=1, text/html;level=2;
 --- error_code: 502
 --- response_headers_like
 Content-Type: text/html; charset=utf-8
---- response_body
-<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8">
-    <title>Kong Error</title>
-  </head>
-  <body>
-    <h1>Kong Error</h1>
-    <p>An invalid response was received from the upstream server.</p>
-  </body>
-</html>
+--- response_body eval
+qr/<!doctype html>
+\s*<html>
+\s*<head>
+\s*<meta charset="utf\-8">
+\s*<title>Error<\/title>
+\s*<\/head>
+\s*<body>
+\s*<h1>Error<\/h1>
+\s*<p>An invalid response was received from the upstream server.<\/p>
+\s*<p>request_id: .*<\/p>
+\s*<\/body>
+\s*<\/html>/
 --- no_error_log
 [error]
 
 
 
-=== TEST 5: service.response.error() has higher priority than handle_errors
+=== TEST 6: service.response.error() has higher priority than handle_errors
 --- http_config eval: $t::Util::HttpConfig
 --- config
     error_page 500 502 /error_handler;
     location = /error_handler {
         internal;
         content_by_lua_block {
+            kong = {
+              configuration = {},
+            }
+
             local PDK = require "kong.pdk"
             local pdk = PDK.new()
             return pdk.response.exit(200, "nothing happened")
@@ -145,6 +200,10 @@ Content-Type: text/html; charset=utf-8
 
     location = /t {
         content_by_lua_block {
+            kong = {
+              configuration = {},
+            }
+
             local PDK = require "kong.pdk"
             local pdk = PDK.new()
             return pdk.response.error(500)
@@ -156,20 +215,25 @@ GET /t
 --- error_code: 500
 --- response_headers_like
 Content-Type: application/json; charset=utf-8
---- response_body chop
-{
-  "message":"An unexpected error occurred"
-}
+--- response_body eval
+qr/{
+\s*"message":"An unexpected error occurred",
+\s*"request_id":".*"
+}/
 --- no_error_log
 [error]
 
 
 
-=== TEST 6: service.response.error() formats default template
+=== TEST 7: service.response.error() formats default template
 --- http_config eval: $t::Util::HttpConfig
 --- config
     location = /t {
         content_by_lua_block {
+            kong = {
+              configuration = {},
+            }
+
             local PDK = require "kong.pdk"
             local pdk = PDK.new()
             return pdk.response.error(419, "I'm not a teapot")
@@ -183,20 +247,25 @@ Accept: application/json
 --- error_code: 419
 --- response_headers_like
 Content-Type: application/json; charset=utf-8
---- response_body chop
-{
-  "message":"I'm not a teapot"
-}
+--- response_body eval
+qr/{
+\s*"message":"I'm not a teapot",
+\s*"request_id":".*"
+}/
 --- no_error_log
 [error]
 
 
 
-=== TEST 7: service.response.error() overrides default message
+=== TEST 8: service.response.error() overrides default message
 --- http_config eval: $t::Util::HttpConfig
 --- config
     location = /t {
         content_by_lua_block {
+            kong = {
+              configuration = {},
+            }
+
             local PDK = require "kong.pdk"
             local pdk = PDK.new()
             return pdk.response.error(500, "oh no")
@@ -210,20 +279,25 @@ Accept: application/json
 --- error_code: 500
 --- response_headers_like
 Content-Type: application/json; charset=utf-8
---- response_body chop
-{
-  "message":"oh no"
-}
+--- response_body eval
+qr/{
+\s*"message":"oh no",
+\s*"request_id":".*"
+}/
 --- no_error_log
 [error]
 
 
 
-=== TEST 8: service.response.error() overrides default message with a table entry
+=== TEST 9: service.response.error() overrides default message with a table entry
 --- http_config eval: $t::Util::HttpConfig
 --- config
     location = /t {
         content_by_lua_block {
+            kong = {
+              configuration = {},
+            }
+
             local PDK = require "kong.pdk"
             local pdk = PDK.new()
             return pdk.response.error(502, { ["a field"] = "not a default message" })
@@ -237,21 +311,25 @@ Accept: application/xml
 --- error_code: 502
 --- response_headers_like
 Content-Type: application/xml; charset=utf-8
---- response_body
-<?xml version="1.0" encoding="UTF-8"?>
-<error>
-  <message>{"a field":"not a default message"}</message>
-</error>
+--- response_body eval
+qr/<\?xml version="1\.0" encoding="UTF\-8"\?>\n<error>
+\s*<message>\{"a field":"not a default message"\}<\/message>
+\s*<requestid>.*<\/requestid>
+<\/error>/
 --- no_error_log
 [error]
 
 
 
-=== TEST 9: service.response.error() use accept header "*" mime sub-type
+=== TEST 10: service.response.error() use accept header "*" mime sub-type
 --- http_config eval: $t::Util::HttpConfig
 --- config
     location = /t {
         content_by_lua_block {
+            kong = {
+              configuration = {},
+            }
+
             local PDK = require "kong.pdk"
             local pdk = PDK.new()
             return pdk.response.error(410)
@@ -265,14 +343,15 @@ Accept: text/*
 --- error_code: 410
 --- response_headers_like
 Content-Type: text/plain; charset=utf-8
---- response_body
-Gone
+--- response_body eval
+qr/Gone
+request_id:.*/
 --- no_error_log
 [error]
 
 
 
-=== TEST 10: response.error() maps http 400 to grpc InvalidArgument
+=== TEST 11: response.error() maps http 400 to grpc InvalidArgument
 --- http_config eval: $t::Util::HttpConfig
 --- config
     location = /t {
@@ -298,7 +377,7 @@ grpc-message: InvalidArgument
 
 
 
-=== TEST 11: response.error() maps http 401 to grpc Unauthenticated
+=== TEST 12: response.error() maps http 401 to grpc Unauthenticated
 --- http_config eval: $t::Util::HttpConfig
 --- config
     location = /t {
@@ -324,7 +403,7 @@ grpc-message: Unauthenticated
 
 
 
-=== TEST 12: response.error() maps http 403 to grpc PermissionDenied
+=== TEST 13: response.error() maps http 403 to grpc PermissionDenied
 --- http_config eval: $t::Util::HttpConfig
 --- config
     location = /t {
@@ -350,7 +429,7 @@ grpc-message: PermissionDenied
 
 
 
-=== TEST 13: response.error() maps http 429 to grpc ResourceExhausted
+=== TEST 14: response.error() maps http 429 to grpc ResourceExhausted
 --- http_config eval: $t::Util::HttpConfig
 --- config
     location = /t {
@@ -371,5 +450,47 @@ Content-Type: application/grpc
 --- response_headers_like
 grpc-status: 8
 grpc-message: ResourceExhausted
+--- no_error_log
+[error]
+
+
+
+=== TEST 15: service.response.error() honors values of multiple Accept headers
+--- http_config eval: $t::Util::HttpConfig
+--- config
+    location = /t {
+        content_by_lua_block {
+            kong = {
+              configuration = {},
+            }
+
+            local PDK = require "kong.pdk"
+            local pdk = PDK.new()
+            return pdk.response.error(502)
+        }
+    }
+
+--- request
+GET /t
+--- more_headers
+Accept: text/plain;q=0.2, text/*;q=0.1
+Accept: text/css;q=0.7, text/html;q=0.9, */*;q=0.5
+Accept: application/xml;q=0.2, application/json;q=0.3
+--- error_code: 502
+--- response_headers_like
+Content-Type: text/html; charset=utf-8
+--- response_body eval
+qr/<!doctype html>
+\s*<html>
+\s*<head>
+\s*<meta charset="utf\-8">
+\s*<title>Error<\/title>
+\s*<\/head>
+\s*<body>
+\s*<h1>Error<\/h1>
+\s*<p>An invalid response was received from the upstream server.<\/p>
+\s*<p>request_id: .*<\/p>
+\s*<\/body>
+\s*<\/html>/
 --- no_error_log
 [error]

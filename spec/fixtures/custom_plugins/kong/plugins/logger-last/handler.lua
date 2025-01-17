@@ -1,18 +1,13 @@
-local BasePlugin = require "kong.plugins.base_plugin"
 local LoggerHandler = require "spec.fixtures.custom_plugins.kong.plugins.logger.handler"
 
-local LoggerLastHandler = BasePlugin:extend()
-
-
-LoggerLastHandler.PRIORITY = 0
-
-
-function LoggerLastHandler:new()
-  LoggerLastHandler.super.new(self, "logger-last")
-end
+local LoggerLastHandler =  {
+  VERSION = "0.1-t",
+  PRIORITY = 0,
+}
 
 
 LoggerLastHandler.init_worker   = LoggerHandler.init_worker
+LoggerLastHandler.configure     = LoggerHandler.configure
 LoggerLastHandler.certificate   = LoggerHandler.certificate
 LoggerLastHandler.preread       = LoggerHandler.preread
 LoggerLastHandler.rewrite       = LoggerHandler.rewrite
@@ -23,4 +18,3 @@ LoggerLastHandler.log           = LoggerHandler.log
 
 
 return LoggerLastHandler
-

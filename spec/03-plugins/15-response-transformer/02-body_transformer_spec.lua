@@ -9,6 +9,9 @@ describe("Plugin: response-transformer", function()
         remove   = {
           json   = {},
         },
+        rename   = {
+          json   = {}
+        },
         replace  = {
           json   = {}
         },
@@ -56,6 +59,9 @@ describe("Plugin: response-transformer", function()
     describe("append", function()
       local conf = {
         remove   = {
+          json   = {}
+        },
+        rename   = {
           json   = {}
         },
         replace  = {
@@ -113,6 +119,9 @@ describe("Plugin: response-transformer", function()
         remove   = {
           json   = {"p1", "p2"}
         },
+        rename   = {
+          json   = {}
+        },
         replace  = {
           json   = {}
         },
@@ -137,9 +146,57 @@ describe("Plugin: response-transformer", function()
       end)
     end)
 
+    describe("rename", function()
+      local conf = {
+        remove   = {
+          json   = {}
+        },
+        rename   = {
+          json   = {"p1:k1", "p2:k2", "p3:k3", "p4:k4", "p5:k5"},
+        },
+        replace  = {
+          json   = {}
+        },
+        add      = {
+          json   = {}
+        },
+        append   = {
+          json   = {}
+        }
+      }
+      it("parameter", function()
+        local json = [[{"p1" : "v1", "p2" : "v2"}]]
+        local body = body_transformer.transform_json_body(conf, json)
+        local body_json = cjson.decode(body)
+        assert.same({k1 = "v1", k2 = "v2"}, body_json)
+      end)
+      it("preserves empty arrays", function()
+        local json = [[{"p1" : "v1", "p2" : "v2", "p3": []}]]
+        local body = body_transformer.transform_json_body(conf, json)
+        local body_json = cjson.decode(body)
+        assert.same({k1 = "v1", k2 = "v2", k3 = {}}, body_json)
+        assert.equals('[]', cjson.encode(body_json.k3))
+      end)
+      it("number", function()
+        local json = [[{"p3" : -1}]]
+        local body = body_transformer.transform_json_body(conf, json)
+        local body_json = cjson.decode(body)
+        assert.same({k3 = -1}, body_json)
+      end)
+      it("boolean", function()
+        local json = [[{"p4" : false, "p5" : true}]]
+        local body = body_transformer.transform_json_body(conf, json)
+        local body_json = cjson.decode(body)
+        assert.same({k4 = false, k5 = true}, body_json)
+      end)
+    end)
+
     describe("replace", function()
       local conf = {
         remove   = {
+          json   = {}
+        },
+        rename   = {
           json   = {}
         },
         replace  = {
@@ -192,10 +249,13 @@ describe("Plugin: response-transformer", function()
       end)
     end)
 
-    describe("remove, replace, add, append", function()
+    describe("remove, rename, replace, add, append", function()
       local conf = {
         remove   = {
           json   = {"p1"}
+        },
+        rename   = {
+          json   = {"p4:p2"}
         },
         replace  = {
           json   = {"p2:v2"}
@@ -208,31 +268,18 @@ describe("Plugin: response-transformer", function()
         },
       }
       it("combination", function()
-        local json = [[{"p1" : "v1", "p2" : "v1"}]]
+        local json = [[{"p1" : "v1", "p4" : "v1"}]]
         local body = body_transformer.transform_json_body(conf, json)
         local body_json = cjson.decode(body)
         assert.same({p2 = "v2", p3 = {"v1", "v2"}}, body_json)
       end)
       it("preserves empty array", function()
-        local json = [[{"p1" : "v1", "p2" : "v1", "a" : []}]]
+        local json = [[{"p1" : "v1", "p4" : "v1", "a" : []}]]
         local body = body_transformer.transform_json_body(conf, json)
         local body_json = cjson.decode(body)
         assert.same({p2 = "v2", p3 = {"v1", "v2"}, a = {}}, body_json)
         assert.equals('[]', cjson.encode(body_json.a))
       end)
-    end)
-  end)
-
-  describe("is_json_body()", function()
-    it("is truthy when content-type application/json passed", function()
-      assert.truthy(body_transformer.is_json_body("application/json"))
-      assert.truthy(body_transformer.is_json_body("application/json; charset=utf-8"))
-    end)
-    it("is truthy when content-type is multiple values along with application/json passed", function()
-      assert.truthy(body_transformer.is_json_body("application/x-www-form-urlencoded, application/json"))
-    end)
-    it("is falsy when content-type not application/json", function()
-      assert.falsy(body_transformer.is_json_body("application/x-www-form-urlencoded"))
     end)
   end)
 
@@ -271,6 +318,10 @@ describe("Plugin: response-transformer", function()
         remove    = {
           headers = {"h1", "h2", "h3"},
           json    = {}
+        },
+        rename    = {
+          headers = {},
+          json    = {},
         },
         add       = {
           headers = {},
@@ -320,6 +371,74 @@ describe("Plugin: response-transformer", function()
       -- the whitespace. So check equality to make sure whitespace is still there, and hence
       -- body was not touched.
       assert.are.same(body, result)
+    end)
+  end)
+
+  describe("handle unexpected body type", function()
+    -- Related to issue https://github.com/Kong/kong/issues/9461
+
+    local old_kong, handler
+
+    lazy_setup(function()
+      old_kong = _G.kong
+      _G.kong = {
+        response = {
+          get_header = function(header)
+            if header == "Content-Type" then
+              return "application/json"
+            end
+          end,
+          get_raw_body = function()
+            return "not a json value"
+          end,
+          set_raw_body = function() end
+        },
+        log = {
+          warn = function() end
+        }
+      }
+
+      -- force module reload to use mock `_G.kong`
+      package.loaded["kong.plugins.response-transformer.handler"] = nil
+      handler = require("kong.plugins.response-transformer.handler")
+    end)
+
+    lazy_teardown(function()
+      _G.kong = old_kong
+    end)
+
+    it("gracefully fails transforming invalid json body", function()
+      local conf  = {
+        remove    = {
+          headers = {},
+          json    = { "foo" }
+        },
+        rename    = {
+          headers = {},
+          json    = {},
+        },
+        add       = {
+          headers = {},
+          json    = {},
+        },
+        append    = {
+          headers = {},
+          json    = {},
+        },
+        replace   = {
+          headers = {},
+          json    = {},
+        },
+      }
+
+      local spy_response_get_header   = spy.on(kong.response, "get_header")
+      local spy_response_get_raw_body = spy.on(kong.response, "get_raw_body")
+      local spy_response_set_raw_body = spy.on(kong.response, "set_raw_body")
+
+      assert.is_nil(handler:body_filter(conf))
+      assert.spy(spy_response_get_header).was_called_with("Content-Type")
+      assert.spy(spy_response_get_raw_body).was_called()
+      assert.spy(spy_response_set_raw_body).was_not_called()
     end)
   end)
 end)

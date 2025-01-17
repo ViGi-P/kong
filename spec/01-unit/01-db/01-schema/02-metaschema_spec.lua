@@ -1,6 +1,7 @@
 local Schema = require "kong.db.schema"
 local helpers = require "spec.helpers"
 local MetaSchema = require "kong.db.schema.metaschema"
+local constants = require "kong.constants"
 
 
 describe("metaschema", function()
@@ -124,14 +125,14 @@ describe("metaschema", function()
     assert.truthy(MetaSchema:validate(s))
   end)
 
-  it("a schema can be marked as legacy", function()
+  it("a schema cannot be marked as legacy", function()
     local s = {
       name = "hello",
       primary_key = { "foo" },
       legacy = true,
       fields = {
         { foo = { type = "number" } } } }
-    assert.truthy(MetaSchema:validate(s))
+    assert.falsy(MetaSchema:validate(s))
 
     s = {
       name = "hello",
@@ -439,6 +440,32 @@ describe("metaschema", function()
     assert.truthy(MetaSchema:validate(s))
   end)
 
+  it("populates the 'table_name' field from 'name' if not supplied", function()
+    local s = {
+      name = "testing",
+      primary_key = { "id" },
+      fields = {
+        { id = { type = "string", }, },
+        { foo = { type = "string" }, },
+      },
+    }
+
+    assert.truthy(MetaSchema:validate(s))
+    local schema = Schema.new(s)
+
+    assert.not_nil(schema.table_name)
+    assert.equals("testing", schema.name)
+    assert.equals("testing", schema.table_name)
+
+    s.table_name = "explicit_table_name"
+    assert.truthy(MetaSchema:validate(s))
+    schema = Schema.new(s)
+
+    assert.not_nil(schema.table_name)
+    assert.equals("testing", schema.name)
+    assert.equals("explicit_table_name", schema.table_name)
+  end)
+
   describe("subschemas", function()
 
     it("supports declaring subschemas", function()
@@ -579,6 +606,19 @@ describe("metaschema", function()
   end)
 
   it("validates transformation has transformation function specified (positive)", function()
+    assert.truthy(MetaSchema:validate({
+      name = "test",
+      primary_key = { "test" },
+      fields = {
+        { test = { type = "string" } },
+      },
+      transformations = {
+        {
+          on_write = function() return true end,
+        },
+      },
+    }))
+
     assert.truthy(MetaSchema:validate({
       name = "test",
       primary_key = { "test" },
@@ -937,7 +977,7 @@ describe("metasubschema", function()
     }
     local ok, err = MetaSchema.MetaSubSchema:validate(s)
     assert.falsy(ok)
-    assert.match("only one of these fields must be non-empty",
+    assert.match("exactly one of these fields must be non-empty",
                  err.entity_checks[1]["@entity"][1], 1, true)
   end)
 
@@ -1093,4 +1133,565 @@ describe("metasubschema", function()
       assert.truthy(MetaSchema.MetaSubSchema:validate(schema))
     end)
   end
+
+  it("validates transformation has transformation function specified (positive)", function()
+    assert.truthy(MetaSchema.MetaSubSchema:validate({
+      name = "test",
+      fields = {
+        { test = { type = "string" } },
+      },
+      transformations = {
+        {
+          on_write = function() return true end,
+        },
+      },
+    }))
+
+    assert.truthy(MetaSchema.MetaSubSchema:validate({
+      name = "test",
+      fields = {
+        { test = { type = "string" } },
+      },
+      transformations = {
+        {
+          input = { "test" },
+          on_write = function() return true end,
+        },
+      },
+    }))
+
+    assert.truthy(MetaSchema.MetaSubSchema:validate({
+      name = "test",
+      fields = {
+        { test = { type = "string" } },
+      },
+      transformations = {
+        {
+          input = { "test" },
+          on_read = function() return true end,
+        },
+      },
+    }))
+
+    assert.truthy(MetaSchema.MetaSubSchema:validate({
+      name = "test",
+      fields = {
+        { test = { type = "string" } },
+      },
+      transformations = {
+        {
+          input = { "test" },
+          on_read = function() return true end,
+          on_write = function() return true end,
+        },
+      },
+    }))
+  end)
+
+  it("validates transformation has transformation function specified (negative)", function()
+    assert.falsy(MetaSchema.MetaSubSchema:validate({
+      name = "test",
+      fields = {
+        { test = { type = "string" } },
+      },
+      transformations = {
+        {
+          input = { "test" },
+        },
+      },
+    }))
+  end)
+
+  it("validates transformation input fields exists (positive)", function()
+    assert.truthy(MetaSchema.MetaSubSchema:validate({
+      name = "test",
+      fields = {
+        { test = { type = "string" } },
+      },
+      transformations = {
+        {
+          input = { "test" },
+          on_write = function() return true end,
+        },
+      },
+    }))
+  end)
+
+  it("validates transformation input fields exists (negative)", function()
+    assert.falsy(MetaSchema.MetaSubSchema:validate({
+      name = "test",
+      fields = {
+        { test = { type = "string" } },
+      },
+      transformations = {
+        {
+          input = { "nonexisting" },
+          on_write = function() return true end,
+        },
+      },
+    }))
+  end)
+
+  it("validates nested transformation input fields exists (positive)", function()
+    assert.truthy(MetaSchema.MetaSubSchema:validate({
+      name = "test",
+      fields = {
+        {
+          test = {
+            type = "record",
+            fields = {
+              {
+                field = { type = "string" }
+              },
+            }
+          }
+        },
+      },
+      transformations = {
+        {
+          input = { "test.field" },
+          on_write = function() return true end,
+        },
+      },
+    }))
+  end)
+
+  it("validates nested transformation input fields exists (negative)", function()
+    assert.falsy(MetaSchema.MetaSubSchema:validate({
+      name = "test",
+      fields = {
+        {
+          test = {
+            type = "record",
+            fields = {
+              {
+                field = { type = "string" },
+              },
+            },
+          },
+        },
+      },
+      transformations = {
+        {
+          input = { "test.nonexisting" },
+          on_write = function() return true end,
+        },
+      },
+    }))
+
+    assert.falsy(MetaSchema.MetaSubSchema:validate({
+      name = "test",
+      fields = {
+        {
+          test = {
+            type = "record",
+            fields = {
+              {
+                field = { type = "string" },
+              },
+            },
+          },
+        },
+      },
+      transformations = {
+        {
+          input = { "nonexisting.field" },
+          on_write = function() return true end,
+        },
+      },
+    }))
+  end)
+
+  it("validates transformation needs fields exists (positive)", function()
+    assert.truthy(MetaSchema.MetaSubSchema:validate({
+      name = "test",
+      fields = {
+        { test = { type = "string" } },
+      },
+      transformations = {
+        {
+          input = { "test" },
+          needs = { "test" },
+          on_write = function() return true end,
+        },
+      },
+    }))
+  end)
+
+  it("validates transformation needs fields exists (negative)", function()
+    assert.falsy(MetaSchema.MetaSubSchema:validate({
+      name = "test",
+      fields = {
+        { test = { type = "string" } },
+      },
+      transformations = {
+        {
+          input = { "test" },
+          needs = { "nonexisting" },
+          on_write = function() return true end,
+        },
+      },
+    }))
+  end)
+
+  it("validates nested transformation needs fields exists (positive)", function()
+    assert.truthy(MetaSchema.MetaSubSchema:validate({
+      name = "test",
+      fields = {
+        {
+          test = {
+            type = "record",
+            fields = {
+              {
+                field = { type = "string" }
+              },
+            }
+          }
+        },
+      },
+      transformations = {
+        {
+          input = { "test.field" },
+          needs = { "test.field" },
+          on_write = function() return true end,
+        },
+      },
+    }))
+  end)
+
+  it("validates nested transformation needs fields exists (negative)", function()
+    assert.falsy(MetaSchema.MetaSubSchema:validate({
+      name = "test",
+      fields = {
+        {
+          test = {
+            type = "record",
+            fields = {
+              {
+                field = { type = "string" },
+              },
+            },
+          },
+        },
+      },
+      transformations = {
+        {
+          input = { "test.field" },
+          needs = { "test.nonexisting" },
+          on_write = function() return true end,
+        },
+      },
+    }))
+
+    assert.falsy(MetaSchema.MetaSubSchema:validate({
+      name = "test",
+      fields = {
+        {
+          test = {
+            type = "record",
+            fields = {
+              {
+                field = { type = "string" },
+              },
+            },
+          },
+        },
+      },
+      transformations = {
+        {
+          input = { "test.field" },
+          needs = { "nonexisting.field" },
+          on_write = function() return true end,
+        },
+      },
+    }))
+  end)
+
+  describe("json fields", function()
+    local NS = constants.SCHEMA_NAMESPACES.PROXY_WASM_FILTERS
+
+    it("requires the field to have a json_schema attribute", function()
+      local ok, err = MetaSchema:validate({
+        name = "test",
+        primary_key = { "id" },
+        fields = {
+          { my_field = { type = "json" } },
+          { id = { type = "string" }, },
+        },
+      })
+
+      assert.falsy(ok)
+      assert.is_table(err)
+      assert.matches("field of type .json. must declare .json_schema.", err.my_field)
+
+      assert.truthy(MetaSchema:validate({
+        name = "test",
+        primary_key = { "id" },
+        fields = {
+          { my_field = {
+              type = "json",
+              json_schema = { inline = { type = "string" }, },
+            }
+          },
+          { id = { type = "string" }, },
+        },
+      }))
+    end)
+
+    it("requires at least one of `inline` or `namespace`/`parent_subschema_key`", function()
+      local ok, err = MetaSchema:validate({
+        name = "test",
+        primary_key = { "id" },
+        fields = {
+          { my_field = {
+              type = "json",
+              json_schema = { },
+            }
+          },
+          { id = { type = "string" }, },
+        },
+      })
+
+      assert.falsy(ok)
+      assert.is_table(err)
+      assert.is_table(err.fields)
+      assert.same({
+          {
+            json_schema = {
+              ["@entity"] = {
+                "at least one of these fields must be non-empty: 'inline', 'namespace', 'parent_subschema_key'"
+              }
+            }
+          }
+        }, err.fields)
+    end)
+
+    it("requires that inline schemas are valid", function()
+      local ok, err = MetaSchema:validate({
+        name = "test",
+        primary_key = { "id" },
+        fields = {
+          { my_field = {
+              type = "json",
+              json_schema = {
+                inline = {
+                  type = "not a valid json schema type",
+                },
+              },
+            }
+          },
+          { id = { type = "string" }, },
+        },
+      })
+
+      assert.falsy(ok)
+      assert.is_table(err)
+      assert.is_table(err.fields)
+      assert.same({
+        {
+          json_schema = {
+            inline = "property type validation failed: object needs one of the following rectifications: 1) matches none of the enum values; 2) wrong type: expected array, got string"
+          }
+        }
+      }, err.fields)
+
+      assert.truthy(MetaSchema:validate({
+        name = "test",
+        primary_key = { "id" },
+        fields = {
+          { my_field = {
+              type = "json",
+              json_schema = {
+                inline = {
+                  type = "string",
+                },
+              },
+            }
+          },
+          { id = { type = "string" }, },
+        },
+      }))
+    end)
+
+    it("only allows currently-supported versions of JSON schema", function()
+      local invalid = {
+        "http://json-schema.org/draft-07/schema#",
+        "https://json-schema.org/draft/2019-09/schema",
+        "https://json-schema.org/draft/2020-12/schema",
+      }
+
+      local inline_schema = {
+        type = "string",
+      }
+
+      local schema = {
+        name = "test",
+        primary_key = { "id" },
+        fields = {
+          { my_field = {
+              type = "json",
+              json_schema = {
+                inline = inline_schema,
+              }
+            }
+          },
+          { id = { type = "string" }, },
+        }
+      }
+
+      for _, version in ipairs(invalid) do
+        inline_schema["$schema"] = version
+        local ok, err = MetaSchema:validate(schema)
+        assert.is_nil(ok)
+        assert.is_table(err)
+        assert.is_table(err.fields)
+        assert.is_table(err.fields[1])
+        assert.is_table(err.fields[1].json_schema)
+        assert.matches('unsupported document $schema',
+                       err.fields[1].json_schema.inline, nil, true)
+      end
+
+      -- with fragment
+      inline_schema["$schema"] = "http://json-schema.org/draft-04/schema#"
+      assert.truthy(MetaSchema:validate(schema))
+
+      -- sans fragment
+      inline_schema["$schema"] = "http://json-schema.org/draft-04/schema"
+      assert.truthy(MetaSchema:validate(schema))
+
+      -- $schema is ultimately optional
+      inline_schema["$schema"] = nil
+      assert.truthy(MetaSchema:validate(schema))
+    end)
+
+    it("mutually requires `namespace` and `parent_subschema_key`", function()
+      local ok, err = MetaSchema:validate({
+        name = "test",
+        primary_key = { "id" },
+        fields = {
+          { my_field = {
+              type = "json",
+              json_schema = {
+                namespace = NS,
+              },
+            }
+          },
+          { id = { type = "string" }, },
+        },
+      })
+
+      assert.falsy(ok)
+      assert.is_table(err)
+      assert.is_table(err.fields)
+      assert.same({
+          {
+            json_schema = {
+              ["@entity"] = {
+                "all or none of these fields must be set: 'namespace', 'parent_subschema_key'"
+              }
+            }
+          }
+        }, err.fields)
+
+      ok, err = MetaSchema:validate({
+        name = "test",
+        primary_key = { "id" },
+        fields = {
+          { my_field = {
+              type = "json",
+              json_schema = {
+                parent_subschema_key = "id",
+              },
+            }
+          },
+          { id = { type = "string" }, },
+        },
+      })
+
+      assert.falsy(ok)
+      assert.is_table(err)
+      assert.is_table(err.fields)
+      assert.same({
+          {
+            json_schema = {
+              ["@entity"] = {
+                "all or none of these fields must be set: 'namespace', 'parent_subschema_key'"
+              }
+            }
+          }
+        }, err.fields)
+    end)
+
+    it("requires that `parent_subschema_key` is a string field of the parent schema", function()
+      local ok, err = MetaSchema:validate({
+        name = "test",
+        primary_key = { "id" },
+        fields = {
+          { my_field = {
+              type = "json",
+              json_schema = {
+                namespace = NS,
+                parent_subschema_key = "my_nonexistent_field",
+              },
+            }
+          },
+          { id = { type = "string" }, },
+        },
+      })
+
+      assert.falsy(ok)
+      assert.same({
+          my_field = {
+            json_schema = {
+              parent_subschema_key = "value must be a field name of the parent schema"
+            }
+          }
+        }, err)
+
+      ok, err = MetaSchema:validate({
+        name = "test",
+        primary_key = { "id" },
+        fields = {
+          { my_field = {
+              type = "json",
+              json_schema = {
+                namespace = NS,
+                parent_subschema_key = "my_non_string_field",
+              },
+            }
+          },
+          { id = { type = "string" }, },
+          { my_non_string_field = { type = "number" } },
+        },
+      })
+
+      assert.falsy(ok)
+      assert.same({
+          my_field = {
+            json_schema = {
+              parent_subschema_key = "value must be a string field of the parent schema",
+            }
+          }
+        }, err)
+
+      assert.truthy(MetaSchema:validate({
+        name = "test",
+        primary_key = { "id" },
+        fields = {
+          { my_field = {
+              type = "json",
+              json_schema = {
+                namespace = NS,
+                parent_subschema_key = "my_string_field",
+              },
+            }
+          },
+          { id = { type = "string" }, },
+          { my_string_field = { type = "string" }, },
+        },
+      }))
+
+    end)
+
+  end)
 end)

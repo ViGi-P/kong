@@ -90,13 +90,17 @@ for _, strategy in helpers.each_strategy() do
       })
       bu.end_testcase_setup(strategy, bp, "strict")
 
-      local res = assert(proxy_client:send {
-        method  = "GET",
-        path = "/recreate_test",
-      })
+      helpers.wait_until(function()
+        local res = assert(proxy_client:send {
+          method  = "GET",
+          path = "/recreate_test",
+        })
 
-      local body = assert.response(res).has_status(200)
-      assert.equal("host is: upstream.example.com:10002", body)
+        return pcall(function()
+          local body = assert.response(res).has_status(200)
+          assert.equal("host is: upstream.example.com:10002", body)
+        end)
+      end, 10)
     end)
 
     it("balancer retry doesn't update Host if preserve_host is true", function()
@@ -114,18 +118,22 @@ for _, strategy in helpers.each_strategy() do
         service = { id = service.id },
         preserve_host = true,
         paths = { "/", },
-        hosts = { "test.com" }
+        hosts = { "test.test" }
       })
       bu.end_testcase_setup(strategy, bp, "strict")
 
-      local res = assert(proxy_client:send {
-        method  = "GET",
-        path = "/recreate_test",
-        headers = { ["Host"] = "test.com" },
-      })
+      helpers.wait_until(function()
+        local res = assert(proxy_client:send {
+          method  = "GET",
+          path = "/recreate_test",
+          headers = { ["Host"] = "test.test" },
+        })
 
-      local body = assert.response(res).has_status(200)
-      assert.equal("host is: test.com", body)
+        return pcall(function()
+          local body = assert.response(res).has_status(200)
+          assert.equal("host is: test.test", body)
+        end)
+      end, 10)
     end)
   end)
 end

@@ -1,5 +1,8 @@
 local helpers = require "spec.helpers"
+local ssl_fixtures = require "spec.fixtures.ssl"
 local cjson = require "cjson"
+local constants = require "kong.constants"
+local Errors  = require "kong.db.errors"
 
 local UUID_PATTERN = "%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x"
 
@@ -16,7 +19,8 @@ describe("Admin API - Kong routes with strategy #" .. strategy, function()
   lazy_setup(function()
     helpers.get_db_utils(nil, {}) -- runs migrations
     assert(helpers.start_kong {
-      plugins = "bundled,reports-api",
+      database = strategy,
+      plugins = "bundled,reports-api,dummy",
       pg_password = "hide_me"
     })
     client = helpers.admin_client(10000)
@@ -28,7 +32,46 @@ describe("Admin API - Kong routes with strategy #" .. strategy, function()
   end)
 
   describe("/", function()
-    it("returns Kong's version number and tagline", function()
+    it("returns headers with HEAD method", function()
+      local res1 = assert(client:send {
+        method = "GET",
+        path = "/"
+      })
+
+      local body = assert.res_status(200, res1)
+      assert.not_equal("", body)
+
+      local res2 = assert(client:send {
+        method = "HEAD",
+        path = "/"
+      })
+      local body = assert.res_status(200, res2)
+      assert.equal("", body)
+
+      res1.headers["Date"] = nil
+      res2.headers["Date"] = nil
+      res1.headers["X-Kong-Admin-Latency"] = nil
+      res2.headers["X-Kong-Admin-Latency"] = nil
+
+      assert.same(res1.headers, res2.headers)
+    end)
+
+    it("returns allow and CORS headers with OPTIONS method", function()
+      local res = assert(client:send {
+        method = "OPTIONS",
+        path = "/"
+      })
+
+      local body = assert.res_status(204, res)
+      assert.equal("", body)
+      assert.equal("GET, HEAD, OPTIONS", res.headers["Allow"])
+      assert.equal("GET, HEAD, OPTIONS", res.headers["Access-Control-Allow-Methods"])
+      assert.equal("Content-Type", res.headers["Access-Control-Allow-Headers"])
+      assert.equal("*", res.headers["Access-Control-Allow-Origin"])
+      assert.not_nil(res.headers["X-Kong-Admin-Latency"])
+    end)
+
+    it("returns Kong's version number, edition info and tagline", function()
       local res = assert(client:send {
         method = "GET",
         path = "/"
@@ -36,6 +79,7 @@ describe("Admin API - Kong routes with strategy #" .. strategy, function()
       local body = assert.res_status(200, res)
       local json = cjson.decode(body)
       assert.equal(meta._VERSION, json.version)
+      assert.equal(meta._VERSION:match("enterprise") and "enterprise" or "community", json.edition)
       assert.equal("Welcome to kong", json.tagline)
     end)
     it("returns a UUID as the node_id", function()
@@ -122,7 +166,6 @@ describe("Admin API - Kong routes with strategy #" .. strategy, function()
     end)
   end)
 
-
   describe("/endpoints", function()
     it("only returns base, plugin, and custom-plugin endpoints", function()
       local res = assert(client:send {
@@ -148,8 +191,9 @@ describe("Admin API - Kong routes with strategy #" .. strategy, function()
     end)
   end)
 
-
   describe("/status", function()
+    local empty_config_hash = constants.DECLARATIVE_EMPTY_CONFIG_HASH
+
     it("returns status info", function()
       local res = assert(client:send {
         method = "GET",
@@ -157,10 +201,7 @@ describe("Admin API - Kong routes with strategy #" .. strategy, function()
       })
       local body = assert.res_status(200, res)
       local json = cjson.decode(body)
-      assert.is_table(json.database)
       assert.is_table(json.server)
-
-      assert.is_boolean(json.database.reachable)
 
       assert.is_number(json.server.connections_accepted)
       assert.is_number(json.server.connections_active)
@@ -169,6 +210,62 @@ describe("Admin API - Kong routes with strategy #" .. strategy, function()
       assert.is_number(json.server.connections_writing)
       assert.is_number(json.server.connections_waiting)
       assert.is_number(json.server.total_requests)
+      if strategy == "off" then
+        assert.is_equal(empty_config_hash, json.configuration_hash) -- all 0 in DBLESS mode until configuration is applied
+        assert.is_nil(json.database)
+
+      else
+        assert.is_nil(json.configuration_hash) -- not present in DB mode
+        assert.is_table(json.database)
+        assert.is_boolean(json.database.reachable)
+      end
+    end)
+
+    it("returns status info including a configuration_hash in DBLESS mode if an initial configuration has been provided #off", function()
+      -- push an initial configuration so that a configuration_hash will be present
+      local postres = assert(client:send {
+        method = "POST",
+        path = "/config",
+        body = {
+          config = [[
+          _format_version: "1.1"
+          services:
+          - host: "konghq.com"
+          ]],
+        },
+        headers = {
+          ["Content-Type"] = "application/json"
+        }
+      })
+      assert.res_status(201, postres)
+
+      -- verify the status endpoint now includes a value (other than the default) for the configuration_hash
+      local res = assert(client:send {
+        method = "GET",
+        path = "/status"
+      })
+      local body = assert.res_status(200, res)
+      local json = cjson.decode(body)
+
+      if strategy == "off" then
+        assert.is_nil(json.database)
+
+      else
+        assert.is_table(json.database)
+        assert.is_boolean(json.database.reachable)
+      end
+
+      assert.is_table(json.server)
+      assert.is_number(json.server.connections_accepted)
+      assert.is_number(json.server.connections_active)
+      assert.is_number(json.server.connections_handled)
+      assert.is_number(json.server.connections_reading)
+      assert.is_number(json.server.connections_writing)
+      assert.is_number(json.server.connections_waiting)
+      assert.is_number(json.server.total_requests)
+      assert.is_string(json.configuration_hash)
+      assert.equal(32, #json.configuration_hash)
+      assert.is_not_equal(empty_config_hash, json.configuration_hash)
     end)
 
     it("database.reachable is `true` when DB connection is healthy", function()
@@ -186,7 +283,11 @@ describe("Admin API - Kong routes with strategy #" .. strategy, function()
       local body = assert.res_status(200, res)
       local json = cjson.decode(body)
 
-      assert.is_true(json.database.reachable)
+      if strategy == "off" then
+        assert.is_nil(json.database)
+      else
+        assert.is_true(json.database.reachable)
+      end
     end)
 
     describe("memory stats", function()
@@ -336,6 +437,7 @@ describe("Admin API - Kong routes with strategy #" .. strategy, function()
         local body = assert.res_status(200, res)
         local json = cjson.decode(body)
         assert.is_table(json.fields)
+        assert.is_table(json.entity_checks)
       end
     end)
     it("returns 404 on a missing entity", function()
@@ -363,6 +465,40 @@ describe("Admin API - Kong routes with strategy #" .. strategy, function()
     end)
   end)
 
+  describe("/schemas/vaults/:name", function()
+    it("returns schema of all vaults", function()
+      for _, vault in ipairs({"env"}) do
+        local res = assert(client:send {
+          method = "GET",
+          path = "/schemas/vaults/" .. vault,
+        })
+        local body = assert.res_status(200, res)
+        local json = cjson.decode(body)
+        assert.is_table(json.fields)
+      end
+    end)
+
+    it("returns 404 on a non-existent vault", function()
+      local res = assert(client:send {
+        method = "GET",
+        path = "/schemas/vaults/not-present",
+      })
+      local body = assert.res_status(404, res)
+      local json = cjson.decode(body)
+      assert.same({ message = "No vault named 'not-present'" }, json)
+    end)
+
+    it("does not return 405 on /schemas/vaults/validate", function()
+      local res = assert(client:send {
+        method = "POST",
+        path = "/schemas/vaults/validate",
+      })
+      local body = assert.res_status(400, res)
+      local json = cjson.decode(body)
+      assert.same("schema violation (name: required field missing)", json.message)
+    end)
+  end)
+
   describe("/schemas/:entity", function()
     it("returns schema of all plugins", function()
       for plugin, _ in pairs(helpers.test_conf.loaded_plugins) do
@@ -384,8 +520,31 @@ describe("Admin API - Kong routes with strategy #" .. strategy, function()
       local json = cjson.decode(body)
       assert.same({ message = "No plugin named 'not-present'" }, json)
     end)
-  end)
+    it("returns information about a deprecated field", function()
+      local res = assert(client:send {
+        method = "GET",
+        path = "/schemas/plugins/dummy",
+      })
+      local body = assert.res_status(200, res)
+      local json = cjson.decode(body)
+      assert.is_table(json.fields)
 
+      local found = false
+      for _, f in ipairs(json.fields) do
+        local config_fields = f.config and f.config.fields
+        for _, cf in ipairs(config_fields or {}) do
+          local deprecation = cf.old_field and cf.old_field.deprecation
+          if deprecation then
+            assert.is_string(deprecation.message)
+            assert.is_number(deprecation.old_default)
+            assert.is_string(deprecation.removal_in_version)
+            found = true
+          end
+        end
+      end
+      assert(found)
+    end)
+  end)
 
   describe("/schemas/:db_entity_name/validate", function()
     it("returns 200 on a valid schema", function()
@@ -397,6 +556,45 @@ describe("Admin API - Kong routes with strategy #" .. strategy, function()
       local json = cjson.decode(body)
       assert.equal("schema validation successful", json.message)
     end)
+ 
+    it("returns 200 on certificates schema with snis", function()
+
+      local res = assert(client:post("/schemas/certificates/validate", {
+        body = {
+          cert = ssl_fixtures.cert,
+          key  = ssl_fixtures.key,
+          snis = {"a", "b", "c" },
+        },
+        headers = { ["Content-Type"] = "application/json" }
+      }))
+      local body = assert.res_status(200, res)
+      local json = cjson.decode(body)
+      assert.equal("schema validation successful", json.message)
+    end)
+    
+    it("returns 400 on certificates schema with invalid snis", function()
+
+      local res = assert(client:post("/schemas/certificates/validate", {
+        body = {
+          cert = ssl_fixtures.cert,
+          key  = ssl_fixtures.key,
+          snis = {"120.0.9.32:90" },
+        },
+        headers = { ["Content-Type"] = "application/json" }
+      }))
+      local body = assert.res_status(400, res)
+      local json = cjson.decode(body)
+      local expected_body = {
+        fields= {
+          snis= { "must not be an IP" }
+        },
+        name= "schema violation",
+        message= "schema violation (snis.1: must not be an IP)",
+        code= Errors.codes.SCHEMA_VIOLATION,
+      }
+      assert.same(expected_body, json)
+    end)
+
     it("returns 200 on a valid plugin schema", function()
       local res = assert(client:post("/schemas/plugins/validate", {
         body = {
@@ -426,6 +624,107 @@ describe("Admin API - Kong routes with strategy #" .. strategy, function()
       local json = cjson.decode(body)
       assert.equal("schema violation", json.name)
     end)
+    it("returns 200 on a valid plugin schema which contains dot in the key of custom_fields_by_lua", function()
+      local res = assert(client:post("/schemas/plugins/validate", {
+        body = {
+          name = "file-log",
+          config = {
+            path = "tmp/test",
+            custom_fields_by_lua = {
+              new_field = "return 123",
+              ["request.headers.myheader"] = "return nil",
+            },
+          },
+        },
+        headers = {["Content-Type"] = "application/json"}
+      }))
+      local body = assert.res_status(200, res)
+      local json = cjson.decode(body)
+      assert.equal("schema validation successful", json.message)
+    end)
+  end)
+
+  describe("/non-existing", function()
+    it("returns 404 with HEAD", function()
+      local res = assert(client:send {
+        method = "HEAD",
+        path = "/non-existing"
+      })
+      local body = assert.res_status(404, res)
+      assert.equal("", body)
+    end)
+    it("returns 404 with OPTIONS", function()
+      local res = assert(client:send {
+        method = "OPTIONS",
+        path = "/non-existing"
+      })
+      local body = assert.res_status(404, res)
+      local json = cjson.decode(body)
+      assert.equal("Not found", json.message)
+    end)
+    it("returns 404 with GET", function()
+      local res = assert(client:send {
+        method = "GET",
+        path = "/non-existing"
+      })
+      local body = assert.res_status(404, res)
+      local json = cjson.decode(body)
+      assert.equal("Not found", json.message)
+    end)
+    it("returns 404 with POST", function()
+      local res = assert(client:send {
+        method = "POST",
+        path = "/non-existing"
+      })
+      local body = assert.res_status(404, res)
+      local json = cjson.decode(body)
+      assert.equal("Not found", json.message)
+    end)
+    it("returns 404 with PUT", function()
+      local res = assert(client:send {
+        method = "PUT",
+        path = "/non-existing"
+      })
+      local body = assert.res_status(404, res)
+      local json = cjson.decode(body)
+      assert.equal("Not found", json.message)
+    end)
+    it("returns 404 with DELETE", function()
+      local res = assert(client:send {
+        method = "DELETE",
+        path = "/non-existing"
+      })
+      local body = assert.res_status(404, res)
+      local json = cjson.decode(body)
+      assert.equal("Not found", json.message)
+    end)
   end)
 end)
 end
+describe("Admin API - node ID is set correctly", function()
+  local client
+  local input_node_id = "592e1c2b-6678-45aa-80f9-78cfb29f5e31"
+  lazy_setup(function()
+    helpers.get_db_utils(nil, {}) -- runs migrations
+    assert(helpers.start_kong {
+      node_id = input_node_id
+    })
+    client = helpers.admin_client(10000)
+  end)
+
+  lazy_teardown(function()
+    if client then client:close() end
+    helpers.stop_kong()
+  end)
+
+  it("returns node-id set in configuration", function()
+    local res1 = assert(client:send {
+      method = "GET",
+      path = "/"
+    })
+
+    local body = assert.res_status(200, res1)
+    local json = cjson.decode(body)
+    assert.equal(input_node_id, json.node_id)
+  end)
+end)

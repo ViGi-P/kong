@@ -1,8 +1,9 @@
 local helpers = require "spec.helpers"
-local utils = require "kong.tools.utils"
+local uuid = require "kong.tools.uuid"
 local cjson = require "cjson"
 local pl_path = require "pl.path"
 local pl_file = require "pl.file"
+local shell = require "resty.shell"
 
 
 local LOG_WAIT_TIMEOUT = 10
@@ -98,7 +99,7 @@ for _, strategy in helpers.each_strategy() do
       }
 
       bp.routes:insert {
-        hosts     = { "global1.com" },
+        hosts     = { "global1.test" },
         protocols = { "http" },
         service   = service1,
       }
@@ -120,7 +121,7 @@ for _, strategy in helpers.each_strategy() do
       }
 
       local route1 = bp.routes:insert {
-        hosts     = { "api1.com" },
+        hosts     = { "api1.test" },
         protocols = { "http" },
         service   = service2,
       }
@@ -151,7 +152,7 @@ for _, strategy in helpers.each_strategy() do
       }
 
       local route2 = bp.routes:insert {
-        hosts     = { "api2.com" },
+        hosts     = { "api2.test" },
         protocols = { "http" },
         service   = service3,
       }
@@ -172,7 +173,7 @@ for _, strategy in helpers.each_strategy() do
       }
 
       local route3 = bp.routes:insert {
-        hosts     = { "api3.com" },
+        hosts     = { "api3.test" },
         protocols = { "http" },
         service   = service4,
       }
@@ -231,14 +232,14 @@ for _, strategy in helpers.each_strategy() do
 
     lazy_teardown(function()
       if proxy_client then proxy_client:close() end
-      helpers.stop_kong(nil, true)
+      helpers.stop_kong()
     end)
 
     it("checks global configuration without credentials", function()
       local res = assert(proxy_client:send {
         method  = "GET",
         path    = "/status/200",
-        headers = { Host = "global1.com" }
+        headers = { Host = "global1.test" }
       })
       assert.res_status(401, res)
     end)
@@ -247,7 +248,7 @@ for _, strategy in helpers.each_strategy() do
       local res = assert(proxy_client:send {
         method  = "GET",
         path    = "/status/200?apikey=secret1",
-        headers = { Host = "global1.com" }
+        headers = { Host = "global1.test" }
       })
       assert.res_status(200, res)
       assert.equal("1", res.headers["x-ratelimit-limit-hour"])
@@ -257,7 +258,7 @@ for _, strategy in helpers.each_strategy() do
       local res = assert(proxy_client:send {
         method  = "GET",
         path    = "/status/200?apikey=secret1",
-        headers = { Host = "api1.com" }
+        headers = { Host = "api1.test" }
       })
       assert.res_status(200, res)
       assert.equal("2", res.headers["x-ratelimit-limit-hour"])
@@ -267,7 +268,7 @@ for _, strategy in helpers.each_strategy() do
       local res = assert(proxy_client:send {
         method  = "GET",
         path    = "/status/200?apikey=secret2",
-        headers = { Host = "global1.com" }
+        headers = { Host = "global1.test" }
       })
       assert.res_status(200, res)
       assert.equal("3", res.headers["x-ratelimit-limit-hour"])
@@ -277,7 +278,7 @@ for _, strategy in helpers.each_strategy() do
       local res = assert(proxy_client:send {
         method  = "GET",
         path    = "/status/200?apikey=secret2",
-        headers = { Host = "api2.com" }
+        headers = { Host = "api2.test" }
       })
       assert.res_status(200, res)
       assert.equal("4", res.headers["x-ratelimit-limit-hour"])
@@ -287,7 +288,7 @@ for _, strategy in helpers.each_strategy() do
       local res = assert(proxy_client:send {
         method  = "GET",
         path    = "/status/200",
-        headers = { Host = "api3.com" }
+        headers = { Host = "api3.test" }
       })
       assert.res_status(200, res)
       assert.equal("5", res.headers["x-ratelimit-limit-hour"])
@@ -409,12 +410,12 @@ for _, strategy in helpers.each_strategy() do
       end)
 
       before_each(function()
-        os.execute("echo -n '' > " .. FILE_LOG_PATH)
-        os.execute("chmod 0777 " .. FILE_LOG_PATH)
+        helpers.clean_logfile(FILE_LOG_PATH)
+        shell.run("chmod 0777 " .. FILE_LOG_PATH, nil, 0)
       end)
 
       it("execute a log plugin", function()
-        local uuid = utils.uuid()
+        local uuid = uuid.uuid()
 
         local res = assert(proxy_client:send {
           method = "GET",
@@ -469,7 +470,7 @@ for _, strategy in helpers.each_strategy() do
 
       -- regression test for bug spotted in 0.12.0rc2
       it("responses.send stops plugin but runloop continues", function()
-        local uuid = utils.uuid()
+        local uuid = uuid.uuid()
 
         local res = assert(proxy_client:send {
           method = "GET",
@@ -676,6 +677,37 @@ for _, strategy in helpers.each_strategy() do
         end
 
         do
+          -- plugin to mock runtime exception
+          local mock_one_fn = [[
+            local nilValue = nil
+            kong.log.info('test' .. nilValue)
+          ]]
+
+          local mock_two_fn = [[
+            ngx.header['X-Source'] = kong.response.get_source()
+          ]]
+
+          local mock_service = bp.services:insert {
+            name = "runtime_exception",
+          }
+
+          bp.routes:insert {
+            hosts     = { "runtime_exception" },
+            protocols = { "http" },
+            service   = mock_service,
+          }
+
+          bp.plugins:insert {
+            name     = "pre-function",
+            service  = { id = mock_service.id },
+            config  = {
+              ["access"] = { mock_one_fn },
+              ["header_filter"] = { mock_two_fn },
+            },
+          }
+        end
+
+        do
           -- global plugin to catch Nginx-produced client errors
           bp.plugins:insert {
             name = "file-log",
@@ -712,14 +744,14 @@ for _, strategy in helpers.each_strategy() do
 
       lazy_teardown(function()
         helpers.stop_kong("servroot2")
-        helpers.stop_kong(nil, true)
+        helpers.stop_kong()
       end)
 
 
       before_each(function()
         proxy_client = helpers.proxy_client()
-        os.execute("echo -n '' > " .. FILE_LOG_PATH)
-        os.execute("chmod 0777 " .. FILE_LOG_PATH)
+        helpers.clean_logfile(FILE_LOG_PATH)
+        shell.run("chmod 0777 " .. FILE_LOG_PATH, nil, 0)
       end)
 
 
@@ -734,7 +766,7 @@ for _, strategy in helpers.each_strategy() do
 
       it("executes a log plugin on Bad Gateway (HTTP 502)", function()
         -- triggers error_page directive
-        local uuid = utils.uuid()
+        local uuid = uuid.uuid()
 
         local res = assert(proxy_client:send {
           method = "GET",
@@ -755,7 +787,7 @@ for _, strategy in helpers.each_strategy() do
 
       it("log plugins sees same request in error_page handler (HTTP 502)", function()
         -- triggers error_page directive
-        local uuid = utils.uuid()
+        local uuid = uuid.uuid()
 
         local res = assert(proxy_client:send {
           method = "POST",
@@ -786,7 +818,7 @@ for _, strategy in helpers.each_strategy() do
 
       it("executes a log plugin on Service Unavailable (HTTP 503)", function()
         -- Does not trigger error_page directive (no proxy_intercept_errors)
-        local uuid = utils.uuid()
+        local uuid = uuid.uuid()
 
         local res = assert(proxy_client:send {
           method = "GET",
@@ -807,7 +839,7 @@ for _, strategy in helpers.each_strategy() do
 
       it("executes a log plugin on Gateway Timeout (HTTP 504)", function()
         -- triggers error_page directive
-        local uuid = utils.uuid()
+        local uuid = uuid.uuid()
 
         local res = assert(proxy_client:send {
           method = "GET",
@@ -828,7 +860,7 @@ for _, strategy in helpers.each_strategy() do
 
       it("log plugins sees same request in error_page handler (HTTP 504)", function()
         -- triggers error_page directive
-        local uuid = utils.uuid()
+        local uuid = uuid.uuid()
 
         local res = assert(proxy_client:send {
           method = "POST",
@@ -859,7 +891,7 @@ for _, strategy in helpers.each_strategy() do
 
       it("executes a global log plugin on Nginx-produced client errors (HTTP 400)", function()
         -- triggers error_page directive
-        local uuid = utils.uuid()
+        local uuid = uuid.uuid()
 
         local res = assert(proxy_client:send {
           method = "GET",
@@ -887,7 +919,7 @@ for _, strategy in helpers.each_strategy() do
 
       it("log plugins sees same request in error_page handler (HTTP 400)", function()
         -- triggers error_page directive
-        local uuid = utils.uuid()
+        local uuid = uuid.uuid()
 
         local res = assert(proxy_client:send {
           method = "POST",
@@ -922,7 +954,7 @@ for _, strategy in helpers.each_strategy() do
 
       it("executes a global log plugin on Nginx-produced client errors (HTTP 414)", function()
         -- triggers error_page directive
-        local uuid = utils.uuid()
+        local uuid = uuid.uuid()
 
         local res = assert(proxy_client:send {
           method = "GET",
@@ -950,7 +982,7 @@ for _, strategy in helpers.each_strategy() do
 
       it("log plugins sees same request in error_page handler (HTTP 414)", function()
         -- triggers error_page directive
-        local uuid = utils.uuid()
+        local uuid = uuid.uuid()
 
         local res = assert(proxy_client:send {
           method = "POST",
@@ -1022,6 +1054,19 @@ for _, strategy in helpers.each_strategy() do
         assert.res_status(504, res) -- Gateway Timeout
         assert.equal("timeout", res.headers["Log-Plugin-Service-Matched"])
       end)
+
+      it("kong.response.get_source() returns \"error\" if plugin runtime exception occurs, FTI-3200", function()
+        local res = assert(proxy_client:send {
+          method = "GET",
+          path = "/status/200",
+          headers = {
+            ["Host"] = "runtime_exception"
+          }
+        })
+        local body = assert.res_status(500, res)
+        assert.same("body_filter", body)
+        assert.equal("error", res.headers["X-Source"])
+      end)
     end)
 
     describe("plugin's init_worker", function()
@@ -1045,7 +1090,7 @@ for _, strategy in helpers.each_strategy() do
           })
 
           local route = assert(bp.routes:insert {
-            hosts     = { "runs-init-worker.org" },
+            hosts     = { "runs-init-worker.test" },
             protocols = { "http" },
             service   = service,
           })
@@ -1079,7 +1124,7 @@ for _, strategy in helpers.each_strategy() do
         it("is executed", function()
           local res = assert(proxy_client:get("/status/400", {
             headers = {
-              ["Host"] = "runs-init-worker.org",
+              ["Host"] = "runs-init-worker.test",
             }
           }))
 
@@ -1124,7 +1169,7 @@ for _, strategy in helpers.each_strategy() do
             })
 
             route = assert(bp.routes:insert {
-              hosts     = { "runs-init-worker.org" },
+              hosts     = { "runs-init-worker.test" },
               protocols = { "http" },
               service   = service,
             })
@@ -1167,15 +1212,20 @@ for _, strategy in helpers.each_strategy() do
 
             assert.res_status(201, res)
 
-            local res = assert(proxy_client:get("/status/400", {
-              headers = {
-                ["Host"] = "runs-init-worker.org",
-              }
-            }))
+            local res, body
+            helpers.wait_until(function()
+              res = assert(proxy_client:get("/status/400", {
+                headers = {
+                  ["Host"] = "runs-init-worker.test",
+                }
+              }))
 
-            assert.equal("true", res.headers["Kong-Init-Worker-Called"])
+              return pcall(function()
+                body = assert.res_status(200, res)
+                assert.equal("true", res.headers["Kong-Init-Worker-Called"])
+              end)
+            end, 10)
 
-            local body = assert.res_status(200, res)
             local json = cjson.decode(body)
             assert.same({
               status  = 200,
@@ -1227,7 +1277,7 @@ for _, strategy in helpers.each_strategy() do
     end)
 
     lazy_teardown(function()
-      helpers.stop_kong(nil, true)
+      helpers.stop_kong()
     end)
 
     it("certificate phase clears context, fix #7054", function()

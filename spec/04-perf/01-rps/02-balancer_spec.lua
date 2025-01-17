@@ -2,27 +2,7 @@ local perf = require("spec.helpers.perf")
 local split = require("pl.stringx").split
 local utils = require("spec.helpers.perf.utils")
 
-perf.set_log_level(ngx.DEBUG)
---perf.set_retry_count(3)
-
-local driver = os.getenv("PERF_TEST_DRIVER") or "docker"
-
-if driver == "terraform" then
-  perf.use_driver("terraform", {
-    provider = "equinix-metal",
-    tfvars = {
-      -- Kong Benchmarking
-      packet_project_id = os.getenv("PERF_TEST_PACKET_PROJECT_ID"),
-      -- TODO: use an org token
-      packet_auth_token = os.getenv("PERF_TEST_PACKET_AUTH_TOKEN"),
-      -- packet_plan = "baremetal_1",
-      -- packet_region = "sjc1",
-      -- packet_os = "ubuntu_20_04",
-    }
-  })
-else
-  perf.use_driver(driver)
-end
+perf.use_defaults()
 
 local versions = {}
 
@@ -31,16 +11,7 @@ if env_versions then
   versions = split(env_versions, ",")
 end
 
-local LOAD_DURATION = 60
-
-local function print_and_save(s, path)
-  os.execute("mkdir -p output")
-  print(s)
-  local f = io.open(path or "output/result.txt", "a")
-  f:write(s)
-  f:write("\n")
-  f:close()
-end
+local LOAD_DURATION = os.getenv("PERF_TEST_LOAD_DURATION") or 30
 
 
 for _, version in ipairs(versions) do
@@ -49,16 +20,16 @@ for _, version in ipairs(versions) do
   describe("perf test for Kong " .. version .. " #balancer", function()
     local bp
     lazy_setup(function()
-      helpers = perf.setup()
+      helpers = perf.setup_kong(version)
 
       bp = helpers.get_db_utils("postgres", {
         "routes",
         "services",
         "upstreams",
         "targets",
-      })
+      }, nil, nil, true)
 
-      upstream_uris = perf.start_upstreams([[
+      upstream_uris = perf.start_worker([[
       location = /test {
         return 200;
       }
@@ -122,7 +93,7 @@ for _, version in ipairs(versions) do
     end)
 
     before_each(function()
-      perf.start_kong(version, {
+      perf.start_kong({
         --kong configs
       })
     end)
@@ -136,13 +107,13 @@ for _, version in ipairs(versions) do
     end)
 
     it("#no_upstream", function()
-      print_and_save("### Test Suite: " .. utils.get_test_descriptor())
+      utils.print_and_save("### Test Suite: " .. utils.get_test_descriptor())
 
       local results = {}
       for i=1,3 do
         perf.start_load({
           path = "/no-upstream",
-          connections = 1000,
+          connections = 100,
           threads = 5,
           duration = LOAD_DURATION,
         })
@@ -150,57 +121,57 @@ for _, version in ipairs(versions) do
 
         local result = assert(perf.wait_result())
 
-        print_and_save(("### Result for Kong %s (run %d):\n%s"):format(version, i, result))
+        utils.print_and_save(("### Result for Kong %s (run %d):\n%s"):format(version, i, result))
         results[i] = result
       end
 
-      print_and_save(("### Combined result for Kong %s:\n%s"):format(version, assert(perf.combine_results(results))))
+      utils.print_and_save(("### Combined result for Kong %s:\n%s"):format(version, assert(perf.combine_results(results))))
 
       perf.save_error_log("output/" .. utils.get_test_output_filename() .. ".log")
     end)
 
     it("#upstream_1_target", function()
-      print_and_save("### Test Suite: " .. utils.get_test_descriptor())
+      utils.print_and_save("### Test Suite: " .. utils.get_test_descriptor())
 
       local results = {}
       for i=1,3 do
         perf.start_load({
           path = "/upstream1target",
-          connections = 1000,
+          connections = 100,
           threads = 5,
           duration = LOAD_DURATION,
         })
 
         local result = assert(perf.wait_result())
 
-        print_and_save(("### Result for Kong %s (run %d):\n%s"):format(version, i, result))
+        utils.print_and_save(("### Result for Kong %s (run %d):\n%s"):format(version, i, result))
         results[i] = result
       end
 
-      print_and_save(("### Combined result for Kong %s:\n%s"):format(version, assert(perf.combine_results(results))))
+      utils.print_and_save(("### Combined result for Kong %s:\n%s"):format(version, assert(perf.combine_results(results))))
 
       perf.save_error_log("output/" .. utils.get_test_output_filename() .. ".log")
     end)
 
     it("#upstream_10_targets", function()
-      print_and_save("### Test Suite: " .. utils.get_test_descriptor())
+      utils.print_and_save("### Test Suite: " .. utils.get_test_descriptor())
 
       local results = {}
       for i=1,3 do
         perf.start_load({
           path = "/upstream10targets",
-          connections = 1000,
+          connections = 100,
           threads = 5,
           duration = LOAD_DURATION,
         })
 
         local result = assert(perf.wait_result())
 
-        print_and_save(("### Result for Kong %s (run %d):\n%s"):format(version, i, result))
+        utils.print_and_save(("### Result for Kong %s (run %d):\n%s"):format(version, i, result))
         results[i] = result
       end
 
-      print_and_save(("### Combined result for Kong %s:\n%s"):format(version, assert(perf.combine_results(results))))
+      utils.print_and_save(("### Combined result for Kong %s:\n%s"):format(version, assert(perf.combine_results(results))))
 
       perf.save_error_log("output/" .. utils.get_test_output_filename() .. ".log")
     end)
@@ -225,25 +196,25 @@ for _, version in ipairs(versions) do
         end
       end))
 
-      print_and_save("### Test Suite: " .. utils.get_test_descriptor())
+      utils.print_and_save("### Test Suite: " .. utils.get_test_descriptor())
 
       local results = {}
       for i=1,3 do
         perf.start_load({
           path = "/upstream10targets",
-          connections = 1000,
+          connections = 100,
           threads = 5,
           duration = LOAD_DURATION,
         })
 
         local result = assert(perf.wait_result())
 
-        print_and_save(("### Result for Kong %s (run %d):\n%s"):format(version, i, result))
+        utils.print_and_save(("### Result for Kong %s (run %d):\n%s"):format(version, i, result))
         results[i] = result
       end
       exiting = true
 
-      print_and_save(("### Combined result for Kong %s:\n%s"):format(version, assert(perf.combine_results(results))))
+      utils.print_and_save(("### Combined result for Kong %s:\n%s"):format(version, assert(perf.combine_results(results))))
 
       perf.save_error_log("output/" .. utils.get_test_output_filename() .. ".log")
 

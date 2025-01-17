@@ -1,7 +1,7 @@
-local utils = require("kong.tools.utils")
+local uuid = require("kong.tools.uuid")
 
 
-local CLUSTER_ID = utils.uuid()
+local CLUSTER_ID = uuid.uuid()
 
 
 return {
@@ -49,22 +49,4 @@ return {
       $$;
     ]], CLUSTER_ID),
   },
-  cassandra = {
-    up = string.format([[
-      CREATE TABLE IF NOT EXISTS parameters(
-        key            text,
-        value          text,
-        created_at     timestamp,
-        PRIMARY KEY    (key)
-      );
-
-      INSERT INTO parameters (key, value) VALUES('cluster_id', '%s')
-      IF NOT EXISTS;
-
-      ALTER TABLE certificates ADD cert_alt TEXT;
-      ALTER TABLE certificates ADD key_alt TEXT;
-      ALTER TABLE clustering_data_planes ADD version text;
-      ALTER TABLE clustering_data_planes ADD sync_status text;
-    ]], CLUSTER_ID),
-  }
 }

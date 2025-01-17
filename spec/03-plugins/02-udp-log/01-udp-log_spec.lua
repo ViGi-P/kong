@@ -18,7 +18,7 @@ for _, strategy in helpers.each_strategy() do
       })
 
       local route = bp.routes:insert {
-        hosts = { "udp_logging.com" },
+        hosts = { "udp_logging.test" },
       }
 
       bp.plugins:insert {
@@ -31,7 +31,7 @@ for _, strategy in helpers.each_strategy() do
       }
 
       local route2 = bp.routes:insert {
-        hosts = { "custom_udp_logging.com" },
+        hosts = { "custom_udp_logging.test" },
       }
 
       bp.plugins:insert {
@@ -49,7 +49,7 @@ for _, strategy in helpers.each_strategy() do
 
       local grpc_service = assert(bp.services:insert {
         name = "grpc-service",
-        url = "grpc://localhost:15002",
+        url = helpers.grpcbin_url,
       })
 
       local route2 = assert(bp.routes:insert {
@@ -69,7 +69,7 @@ for _, strategy in helpers.each_strategy() do
 
       local grpcs_service = assert(bp.services:insert {
         name = "grpcs-service",
-        url = "grpcs://localhost:15003",
+        url = helpers.grpcbin_ssl_url,
       })
 
       local route3 = assert(bp.routes:insert {
@@ -113,7 +113,7 @@ for _, strategy in helpers.each_strategy() do
         method  = "GET",
         path    = "/delay/2",
         headers = {
-          host  = "udp_logging.com",
+          host  = "udp_logging.test",
         },
       })
 
@@ -147,7 +147,7 @@ for _, strategy in helpers.each_strategy() do
           method  = "GET",
           path    = "/delay/2",
           headers = {
-            host  = "custom_udp_logging.com",
+            host  = "custom_udp_logging.test",
           },
         })
 
@@ -170,7 +170,7 @@ for _, strategy in helpers.each_strategy() do
           method  = "GET",
           path    = "/delay/2",
           headers = {
-            host  = "custom_udp_logging.com",
+            host  = "custom_udp_logging.test",
           },
         })
 
@@ -186,7 +186,7 @@ for _, strategy in helpers.each_strategy() do
       end)
     end)
 
-    it("logs proper latencies (#grpc) #flaky", function()
+    it("logs proper latencies (#grpc)", function()
       local udp_thread = helpers.udp_server(UDP_PORT)
 
       -- Making the request
@@ -197,9 +197,10 @@ for _, strategy in helpers.each_strategy() do
         },
         opts = {
           ["-authority"] = "udp_logging_grpc.test",
+          ["-H"] = "'Content-Type: text/plain'",
         }
       })
-      assert.truthy(ok)
+      assert.truthy(ok, resp)
       assert.truthy(resp)
 
       -- Getting back the UDP server input
@@ -222,7 +223,7 @@ for _, strategy in helpers.each_strategy() do
       assert.True(is_latencies_sum_adding_up)
     end)
 
-    it("logs proper latencies (#grpcs) #flaky", function()
+    it("logs proper latencies (#grpcs)", function()
       local udp_thread = helpers.udp_server(UDP_PORT)
 
       -- Making the request
@@ -233,9 +234,10 @@ for _, strategy in helpers.each_strategy() do
         },
         opts = {
           ["-authority"] = "udp_logging_grpcs.test",
+          ["-H"] = "'Content-Type: text/plain'",
         }
       })
-      assert.truthy(ok)
+      assert.truthy(ok, resp)
       assert.truthy(resp)
 
       -- Getting back the UDP server input
@@ -266,7 +268,7 @@ for _, strategy in helpers.each_strategy() do
         method  = "GET",
         path    = "/request",
         headers = {
-          host  = "udp_logging.com",
+          host  = "udp_logging.test",
         },
       })
       assert.response(res).has.status(200)

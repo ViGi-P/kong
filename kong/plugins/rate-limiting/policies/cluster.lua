@@ -1,10 +1,9 @@
 local timestamp = require "kong.tools.timestamp"
-local cassandra = require "cassandra"
 
 
 local kong = kong
 local concat = table.concat
-local pairs = pairs
+local ipairs = ipairs
 local floor = math.floor
 local fmt = string.format
 local tonumber = tonumber
@@ -33,45 +32,13 @@ end
 
 
 return {
-  cassandra = {
-    increment = function(connector, limits, identifier, current_timestamp, service_id, route_id, value)
-      local periods = timestamp.get_timestamps(current_timestamp)
-
-      for period, period_date in pairs(periods) do
-        if limits[period] then
-          local res, err = connector:query([[
-            UPDATE ratelimiting_metrics
-               SET value = value + ?
-             WHERE identifier = ?
-               AND period = ?
-               AND period_date = ?
-               AND service_id = ?
-               AND route_id = ?
-          ]], {
-            cassandra.counter(value),
-            identifier,
-            period,
-            cassandra.timestamp(period_date),
-            cassandra.uuid(service_id),
-            cassandra.uuid(route_id),
-          })
-          if not res then
-            kong.log.err("cluster policy: could not increment cassandra counter for period '",
-                         period, "': ", err)
-          end
-        end
-      end
-
-      return true
-    end,
-    find = find,
-  },
   postgres = {
     increment = function(connector, limits, identifier, current_timestamp, service_id, route_id, value)
       local buf = { "BEGIN" }
       local len = 1
       local periods = timestamp.get_timestamps(current_timestamp)
-      for period, period_date in pairs(periods) do
+      for _, period in ipairs(timestamp.timestamp_table_fields) do
+        local period_date = periods[period]
         if limits[period] then
           len = len + 1
           buf[len] = fmt([[

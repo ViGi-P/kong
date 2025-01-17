@@ -10,6 +10,7 @@ for _, strategy in helpers.each_strategy() do
     lazy_setup(function()
       local _
       _, db = helpers.get_db_utils(strategy)
+
       _G.kong.db = db
       assert(helpers.start_kong({
         database   = strategy,
@@ -37,6 +38,24 @@ for _, strategy in helpers.each_strategy() do
       tags = { "potato", "carrot" },
     }
 
+    local disabled_service_def = {
+      _tags = ngx.null,
+      connect_timeout = 60000,
+      created_at = 1549025889,
+      host = "example.com",
+      id = "5c220029-4f4a-48a0-b79b-9eec6f6412c0",
+      name = "disabled",
+      enabled = false,
+      path = ngx.null,
+      port = 80,
+      protocol = "https",
+      read_timeout = 60000,
+      retries = 5,
+      updated_at = 1549025889,
+      write_timeout = 60000,
+      tags = { "onions", "celery" },
+    }
+
     local route_def = {
       _tags = ngx.null,
       created_at = 1549025889,
@@ -53,6 +72,24 @@ for _, strategy in helpers.each_strategy() do
       sources = ngx.null,
       destinations = ngx.null,
       service = { id = service_def.id },
+    }
+
+    local disabled_route_def = {
+      _tags = ngx.null,
+      created_at = 1549025889,
+      id = "02a6749e-1ae3-4904-b429-894ecd679fc4",
+      name = "disabled-bar",
+      protocols = { "http", "https" },
+      methods = ngx.null,
+      hosts = { "example.com" },
+      paths = { "/disabled-route" },
+      regex_priority = 0,
+      strip_path = true,
+      preserve_host = false,
+      snis = ngx.null,
+      sources = ngx.null,
+      destinations = ngx.null,
+      service = { id = disabled_service_def.id },
     }
 
     local certificate_def = {
@@ -90,7 +127,33 @@ for _, strategy in helpers.each_strategy() do
         deny = ngx.null,
         allow = { "*" },
         hide_groups_header = false,
+        always_use_authenticated_groups = false,
       }
+    }
+
+    local disabled_service_plugin_def = {
+      _tags = ngx.null,
+      created_at = 1547047309,
+      id = "7425f330-cdd1-4f65-a6e9-78d631b3ef72",
+      service = { id = disabled_service_def.id },
+      enabled = true,
+      name = "acl",
+      config = {
+        deny = ngx.null,
+        allow = { "*" },
+        hide_groups_header = false,
+        always_use_authenticated_groups = false,
+      }
+    }
+
+    -- plugin is disabled, but attached to enabled service
+    local disabled_plugin_def = {
+      _tags = ngx.null,
+      created_at = 1547047310,
+      id = "9d26ae22-dc45-4988-87f6-bd655a676ae6",
+      enabled = false,
+      name = "key-auth",
+      service = { id = service_def.id },
     }
 
     --[[ FIXME this case is known to cause an issue
@@ -148,10 +211,19 @@ for _, strategy in helpers.each_strategy() do
       assert(declarative.load_into_db({
         snis = { [sni_def.id] = sni_def },
         certificates = { [certificate_def.id] = certificate_def },
-        routes = { [route_def.id] = route_def },
-        services = { [service_def.id] = service_def },
+        routes = {
+          [route_def.id] = route_def,
+          [disabled_route_def.id] = disabled_route_def,
+        },
+        services = {
+          [service_def.id] = service_def,
+          [disabled_service_def.id] = disabled_service_def,
+       },
         consumers = { [consumer_def.id] = consumer_def },
-        plugins = { [plugin_def.id] = plugin_def,
+        plugins = {
+          [plugin_def.id] = plugin_def,
+          [disabled_service_plugin_def.id] = disabled_service_plugin_def,
+          [disabled_plugin_def.id] = disabled_plugin_def,
         -- [plugin_with_null_def.id] = plugin_with_null_def,
         },
         acls = { [acl_def.id] = acl_def  },
@@ -170,7 +242,7 @@ for _, strategy in helpers.each_strategy() do
         assert.equals(sni_def.id, sni.id)
         assert.equals(certificate_def.id, sni.certificate.id)
 
-        local cert = assert(db.certificates:select({ id = certificate_def.id }))
+        local cert = assert(db.certificates:select(certificate_def))
         assert.equals(certificate_def.id, cert.id)
         assert.same(ssl_fixtures.key, cert.key)
         assert.same(ssl_fixtures.cert, cert.cert)
@@ -191,23 +263,23 @@ for _, strategy in helpers.each_strategy() do
         assert.equals("andru", consumer_def.username)
         assert.equals("donalds", consumer_def.custom_id)
 
-        local plugin = assert(db.plugins:select({ id = plugin_def.id }, { nulls = true }))
+        local plugin = assert(db.plugins:select(plugin_def, { nulls = true }))
         assert.equals(plugin_def.id, plugin.id)
         assert.equals(service.id, plugin.service.id)
         assert.equals("acl", plugin.name)
         assert.same(plugin_def.config, plugin.config)
 
-        local acl = assert(db.acls:select({ id = acl_def.id }))
+        local acl = assert(db.acls:select(acl_def))
         assert.equals(consumer_def.id, acl.consumer.id)
         assert.equals("The A Team", acl.group)
 
-        local basicauth_credential = assert(db.basicauth_credentials:select({ id = basicauth_credential_def.id }))
+        local basicauth_credential = assert(db.basicauth_credentials:select(basicauth_credential_def))
         assert.equals(basicauth_credential_def.id, basicauth_credential.id)
         assert.equals(consumer.id, basicauth_credential.consumer.id)
         assert.equals("james", basicauth_credential.username)
         assert.equals(crypto.hash(consumer.id, "secret"), basicauth_credential.password)
 
-        local basicauth_hashed_credential = assert(db.basicauth_credentials:select({ id = basicauth_hashed_credential_def.id }))
+        local basicauth_hashed_credential = assert(db.basicauth_credentials:select(basicauth_hashed_credential_def))
         assert.equals(basicauth_hashed_credential_def.id, basicauth_hashed_credential.id)
         assert.equals(consumer.id, basicauth_hashed_credential.consumer.id)
         assert.equals("bond", basicauth_hashed_credential.username)
@@ -249,7 +321,7 @@ for _, strategy in helpers.each_strategy() do
           "snis"
         }, toplevel_keys)
 
-        assert.equals("2.1", yaml._format_version)
+        assert.equals("3.0", yaml._format_version)
         assert.equals(false, yaml._transform)
 
         assert.equals(1, #yaml.snis)
@@ -264,6 +336,142 @@ for _, strategy in helpers.each_strategy() do
         assert.equals(ssl_fixtures.key, cert.key)
         assert.equals(ssl_fixtures.cert, cert.cert)
 
+        assert.equals(2, #yaml.services)
+        local service = assert(yaml.services[1])
+        assert.equals(service_def.id, service.id)
+        assert.equals("example.com", service.host)
+        assert.equals("https", service.protocol)
+        table.sort(service.tags)
+        assert.same({"carrot", "potato"}, service.tags)
+
+        -- expect disabled services and associated route and plugins to exist
+        local disabled_service = assert(yaml.services[2])
+        assert.equals(disabled_service_def.id, disabled_service.id)
+        assert.equals("example.com", disabled_service.host)
+        assert.equals("https", disabled_service.protocol)
+        table.sort(disabled_service.tags)
+        assert.same({"celery", "onions"}, disabled_service.tags)
+
+        assert.equals(2, #yaml.routes)
+        local route = assert(yaml.routes[2])
+        assert.equals(route_def.id, route.id)
+        assert.equals("bar", route.name)
+        assert.equals("example.com", route.hosts[1])
+        assert.same({ "http", "https" }, route.protocols)
+        assert.equals(service_def.id, route.service)
+
+        local disabled_route = assert(yaml.routes[1])
+        assert.equals(disabled_route_def.id, disabled_route.id)
+        assert.equals("example.com", disabled_route.hosts[1])
+        assert.same({ "http", "https" }, disabled_route.protocols)
+        assert.equals(disabled_service_def.id, disabled_route.service)
+
+        assert.equals(1, #yaml.consumers)
+        local consumer = assert(yaml.consumers[1])
+        assert.equals(consumer_def.id, consumer.id)
+        assert.equals("andru", consumer_def.username)
+        assert.equals("donalds", consumer_def.custom_id)
+
+        assert.equals(3, #yaml.plugins)
+        local plugin = assert(yaml.plugins[1])
+        assert.equals(plugin_def.id, plugin.id)
+        assert.equals(service.id, plugin.service)
+        assert.equals("acl", plugin.name)
+
+        local service_disabled_plugin = assert(yaml.plugins[2])
+        assert.equals(disabled_service_plugin_def.id, service_disabled_plugin.id)
+        assert.equals(disabled_service_def.id, service_disabled_plugin.service)
+        assert.equals("acl", service_disabled_plugin.name)
+
+        local disabled_plugin = assert(yaml.plugins[3])
+        assert.equals(disabled_plugin_def.id, disabled_plugin.id)
+        assert.equals(service_def.id, disabled_plugin.service)
+        assert.equals("key-auth", disabled_plugin.name)
+
+        -- lyaml.load above returns null as its own format
+        assert(plugin.config.deny == lyaml.null)
+        plugin.config.deny = ngx.null
+
+        assert.same(plugin_def.config, plugin.config)
+
+        --[[ FIXME this case is known to cause an issue
+        local plugin_with_null = assert(db.plugins:select(plugin_with_null_def, { nulls = true }))
+        assert.equals(plugin_with_null_def.id, plugin_with_null.id)
+        assert.equals(service.id, plugin_with_null.service.id)
+        assert.equals("correlation-id", plugin_with_null.name)
+        assert.same(plugin_with_null_def.config, plugin_with_null.config
+        --]]
+
+        assert.equals(1, #yaml.acls)
+        local acl = assert(yaml.acls[1])
+        assert.equals(consumer_def.id, acl.consumer)
+        assert.equals("The A Team", acl.group)
+
+        assert.equals(2, #yaml.basicauth_credentials)
+        table.sort(yaml.basicauth_credentials, function(a, b)
+          return a.username > b.username
+        end)
+
+        local bac1 = assert(yaml.basicauth_credentials[1])
+        assert.equals(consumer_def.id, bac1.consumer)
+        assert.equals("james", bac1.username)
+        assert.equals(crypto.hash(consumer_def.id, "secret"), bac1.password)
+
+        local bac2 = assert(yaml.basicauth_credentials[2])
+        assert.equals(consumer_def.id, bac2.consumer)
+        assert.equals("bond", bac2.username)
+        assert.equals(basicauth_hashed_credential_def.password, bac2.password)
+      end)
+
+      it('exports from db without disabled services, and associated routes and plugins, skip_disabled_services=true', function ()
+        local fake_file = {
+          buffer = {},
+          write = function(self, str)
+            self.buffer[#self.buffer + 1] = str
+          end,
+        }
+
+        assert(declarative.export_from_db(fake_file, true, true))
+
+        local exported_str = table.concat(fake_file.buffer)
+        local yaml = lyaml.load(exported_str)
+
+        -- ensure tags & basicauth_credentials are not being exported
+        local toplevel_keys = {}
+        for k in pairs(yaml) do
+          toplevel_keys[#toplevel_keys + 1] = k
+        end
+        table.sort(toplevel_keys)
+        assert.same({
+          "_format_version",
+          "_transform",
+          "acls",
+          "basicauth_credentials",
+          "certificates",
+          "consumers",
+          "parameters",
+          "plugins",
+          "routes",
+          "services",
+          "snis"
+        }, toplevel_keys)
+
+        assert.equals("3.0", yaml._format_version)
+        assert.equals(false, yaml._transform)
+
+        assert.equals(1, #yaml.snis)
+        local sni = assert(yaml.snis[1])
+        assert.equals(sni_def.id, sni.id)
+        assert.equals(sni_def.name, sni.name)
+        assert.equals(certificate_def.id, sni.certificate)
+
+        assert.equals(1, #yaml.certificates)
+        local cert = assert(yaml.certificates[1])
+        assert.equals(certificate_def.id, cert.id)
+        assert.equals(ssl_fixtures.key, cert.key)
+        assert.equals(ssl_fixtures.cert, cert.cert)
+
+        -- expect disabled services and associated route and plugins to not exist
         assert.equals(1, #yaml.services)
         local service = assert(yaml.services[1])
         assert.equals(service_def.id, service.id)
@@ -298,7 +506,7 @@ for _, strategy in helpers.each_strategy() do
         assert.same(plugin_def.config, plugin.config)
 
         --[[ FIXME this case is known to cause an issue
-        local plugin_with_null = assert(db.plugins:select({ id = plugin_with_null_def.id }, { nulls = true }))
+        local plugin_with_null = assert(db.plugins:select(plugin_with_null_def, { nulls = true }))
         assert.equals(plugin_with_null_def.id, plugin_with_null.id)
         assert.equals(service.id, plugin_with_null.service.id)
         assert.equals("correlation-id", plugin_with_null.name)
@@ -328,5 +536,3 @@ for _, strategy in helpers.each_strategy() do
     end)
   end)
 end
-
-

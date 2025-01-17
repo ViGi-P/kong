@@ -21,11 +21,23 @@ local EXPIRATIONS = {
   year = 31536000,
 }
 
-
 local function is_present(str)
   return str and str ~= "" and str ~= null
 end
 
+local function get_redis_configuration(plugin_conf)
+  return {
+     host = plugin_conf.redis.host,
+     port = plugin_conf.redis.port,
+     username = plugin_conf.redis.username,
+     password = plugin_conf.redis.password,
+     database = plugin_conf.redis.database,
+     timeout = plugin_conf.redis.timeout,
+     ssl = plugin_conf.redis.ssl,
+     ssl_verify = plugin_conf.redis.ssl_verify,
+     server_name = plugin_conf.redis.server_name,
+  }
+end
 
 local function get_service_and_route_ids(conf)
   conf = conf or {}
@@ -52,6 +64,69 @@ end
 
 
 local sock_opts = {}
+local function get_redis_connection(conf)
+  local red = redis:new()
+  local redis_config = get_redis_configuration(conf)
+  red:set_timeout(redis_config.timeout)
+
+  sock_opts.ssl = redis_config.ssl
+  sock_opts.ssl_verify = redis_config.ssl_verify
+  sock_opts.server_name = redis_config.server_name
+
+  -- use a special pool name only if redis_config.database is set to non-zero
+  -- otherwise use the default pool name host:port
+  if redis_config.database ~= 0 then
+    sock_opts.pool = fmt( "%s:%d;%d",
+                          redis_config.host,
+                          redis_config.port,
+                          redis_config.database)
+  end
+
+  local ok, err = red:connect(redis_config.host, redis_config.port,
+                              sock_opts)
+  if not ok then
+    kong.log.err("failed to connect to Redis: ", err)
+    return nil, err
+  end
+
+  local times, err = red:get_reused_times()
+  if err then
+    kong.log.err("failed to get connect reused times: ", err)
+    return nil, err
+  end
+
+  if times == 0 then
+    if is_present(redis_config.password) then
+      local ok, err
+      if is_present(redis_config.username) then
+        ok, err = kong.vault.try(function(cfg)
+          return red:auth(cfg.username, cfg.password)
+        end, redis_config)
+      else
+        ok, err = kong.vault.try(function(cfg)
+          return red:auth(cfg.password)
+        end, redis_config)
+      end
+      if not ok then
+        kong.log.err("failed to auth Redis: ", err)
+        return nil, err
+      end
+    end
+
+    if redis_config.database ~= 0 then
+      -- Only call select first time, since we know the connection is shared
+      -- between instances that use the same redis database
+
+      local ok, err = red:select(redis_config.database)
+      if not ok then
+        kong.log.err("failed to change Redis database: ", err)
+        return nil, err
+      end
+    end
+  end
+
+  return red
+end
 
 
 return {
@@ -122,46 +197,9 @@ return {
   },
   ["redis"] = {
     increment = function(conf, identifier, name, current_timestamp, value)
-      local red = redis:new()
-      red:set_timeout(conf.redis_timeout)
-
-      -- use a special pool name only if redis_database is set to non-zero
-      -- otherwise use the default pool name host:port
-      sock_opts.pool = conf.redis_database and
-                       conf.redis_host .. ":" .. conf.redis_port ..
-                       ":" .. conf.redis_database
-      local ok, err = red:connect(conf.redis_host, conf.redis_port,
-                                  sock_opts)
-      if not ok then
-        kong.log.err("failed to connect to Redis: ", err)
+      local red, err = get_redis_connection(conf)
+      if not red then
         return nil, err
-      end
-
-      local times, err = red:get_reused_times()
-      if err then
-        kong.log.err("failed to get connect reused times: ", err)
-        return nil, err
-      end
-
-      if times == 0 then
-        if is_present(conf.redis_password) then
-          local ok, err = red:auth(conf.redis_password)
-          if not ok then
-            kong.log.err("failed to auth Redis: ", err)
-            return nil, err
-          end
-        end
-
-        if conf.redis_database ~= 0 then
-          -- Only call select first time, since we know the connection is shared
-          -- between instances that use the same redis database
-
-          local ok, err = red:select(conf.redis_database)
-          if not ok then
-            kong.log.err("failed to change Redis database: ", err)
-            return nil, err
-          end
-        end
       end
 
       local keys = {}
@@ -206,45 +244,9 @@ return {
       return true
     end,
     usage = function(conf, identifier, name, period, current_timestamp)
-      local red = redis:new()
-      red:set_timeout(conf.redis_timeout)
-      -- use a special pool name only if redis_database is set to non-zero
-      -- otherwise use the default pool name host:port
-      sock_opts.pool = conf.redis_database and
-                       conf.redis_host .. ":" .. conf.redis_port ..
-                       ":" .. conf.redis_database
-      local ok, err = red:connect(conf.redis_host, conf.redis_port,
-                                  sock_opts)
-      if not ok then
-        kong.log.err("failed to connect to Redis: ", err)
+      local red, err = get_redis_connection(conf)
+      if not red then
         return nil, err
-      end
-
-      local times, err = red:get_reused_times()
-      if err then
-        kong.log.err("failed to get connect reused times: ", err)
-        return nil, err
-      end
-
-      if times == 0 then
-        if is_present(conf.redis_password) then
-          local ok, err = red:auth(conf.redis_password)
-          if not ok then
-            kong.log.err("failed to auth Redis: ", err)
-            return nil, err
-          end
-        end
-
-        if conf.redis_database ~= 0 then
-          -- Only call select first time, since we know the connection is shared
-          -- between instances that use the same redis database
-
-          local ok, err = red:select(conf.redis_database)
-          if not ok then
-            kong.log.err("failed to change Redis database: ", err)
-            return nil, err
-          end
-        end
       end
 
       reports.retrieve_redis_version(red)

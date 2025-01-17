@@ -1,6 +1,7 @@
 local lsyslog = require "lsyslog"
 local cjson = require "cjson"
 local sandbox = require "kong.tools.sandbox".sandbox
+local kong_meta = require "kong.meta"
 
 
 local kong = kong
@@ -55,9 +56,6 @@ local FACILITIES = {
   local7 = lsyslog.FACILITY_LOCAL7
 }
 
-local sandbox_opts = { env = { kong = kong, ngx = ngx } }
-
-
 local function send_to_syslog(log_level, severity, message, facility)
   if LOG_PRIORITIES[severity] <= LOG_PRIORITIES[log_level] then
     lsyslog.open(SENDER_NAME, FACILITIES[facility])
@@ -71,25 +69,21 @@ local function log(premature, conf, message)
     return
   end
 
-  -- TODO: revert this commit and use schema to populate default value
-  -- in 2.7 or 3.0 whichever comes eearlier.
-  local facility = conf.facility or "user"
-
   if message.response.status >= 500 then
-    send_to_syslog(conf.log_level, conf.server_errors_severity, message, facility)
+    send_to_syslog(conf.log_level, conf.server_errors_severity, message, conf.facility)
 
   elseif message.response.status >= 400 then
-    send_to_syslog(conf.log_level, conf.client_errors_severity, message, facility)
+    send_to_syslog(conf.log_level, conf.client_errors_severity, message, conf.facility)
 
   else
-    send_to_syslog(conf.log_level, conf.successful_severity, message, facility)
+    send_to_syslog(conf.log_level, conf.successful_severity, message, conf.facility)
   end
 end
 
 
 local SysLogHandler = {
   PRIORITY = 4,
-  VERSION = "2.2.0",
+  VERSION = kong_meta.version,
 }
 
 
@@ -97,7 +91,7 @@ function SysLogHandler:log(conf)
   if conf.custom_fields_by_lua then
     local set_serialize_value = kong.log.set_serialize_value
     for key, expression in pairs(conf.custom_fields_by_lua) do
-      set_serialize_value(key, sandbox(expression, sandbox_opts)())
+      set_serialize_value(key, sandbox(expression)())
     end
   end
 

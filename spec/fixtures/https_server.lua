@@ -9,16 +9,24 @@ local pl_dir = require "pl.dir"
 local pl_file = require "pl.file"
 local pl_template = require "pl.template"
 local pl_path = require "pl.path"
-local pl_text = require "pl.text"
 local uuid = require "resty.jit-uuid"
+local http_client = require "resty.http"
+local cjson = require "cjson"
+local shell = require "resty.shell"
+
+
+local Template = require("pl.stringx").Template
 
 
 -- we need this to get random UUIDs
 math.randomseed(os.time())
 
 
+local HTTPS_SERVER_START_MAX_RETRY = 10
+
 local tmp_root = os.getenv("TMPDIR") or "/tmp"
 local host_regex = [[([a-z0-9\-._~%!$&'()*+,;=]+@)?([a-z0-9\-._~%]+|\[[a-z0-9\-._~%!$&'()*+,;=:]+\])(:?[0-9]+)*]]
+
 
 
 local function create_temp_dir(copy_cert_and_key)
@@ -56,7 +64,7 @@ local function create_conf(params)
     return nil, err
   end
 
-  local compiled_tpl = pl_text.Template(tpl:render(params, { ipairs = ipairs }))
+  local compiled_tpl = Template(tpl:render(params, { ipairs = ipairs }))
   local conf_filename = params.base_path .. "/nginx.conf"
   local conf, err = io.open (conf_filename, "w")
   if err then
@@ -130,6 +138,32 @@ local function count_results(logs_dir)
 end
 
 
+function https_server.clear_access_log(self)
+  local client = assert(http_client.new())
+
+  local uri = string.format("%s://%s:%d/clear_log", self.protocol, self.host, self.http_port)
+
+  local res = assert(client:request_uri(uri, {
+    method = "GET"
+  }))
+
+  assert(res.body == "cleared\n")
+end
+
+
+function https_server.get_access_log(self)
+  local client = assert(http_client.new())
+
+  local uri = string.format("%s://%s:%d/log?do_not_log", self.protocol, self.host, self.http_port)
+
+  local res = assert(client:request_uri(uri, {
+    method = "GET"
+  }))
+
+  return assert(cjson.decode(res.body))
+end
+
+
 function https_server.start(self)
   if not pl_path.exists(tmp_root) or not pl_path.isdir(tmp_root) then
     error("could not get a temporary path", 2)
@@ -152,6 +186,7 @@ function https_server.start(self)
     http_port = self.http_port,
     protocol = self.protocol,
     worker_num = self.worker_num,
+    disable_ipv6 = self.disable_ipv6,
   }
 
   local file, err = create_conf(conf_params)
@@ -159,10 +194,15 @@ function https_server.start(self)
     error(fmt("could not create conf: %s", err), 2)
   end
 
-  local status = os.execute("nginx -c " .. file .. " -p " .. self.base_path)
-  if not status then
-    error("failed starting nginx")
+  for _ = 1, HTTPS_SERVER_START_MAX_RETRY do
+    if shell.run("nginx -c " .. file .. " -p " .. self.base_path, nil, 0) then
+      return
+    end
+
+    ngx.sleep(1)
   end
+
+  error("failed starting nginx")
 end
 
 
@@ -176,7 +216,7 @@ function https_server.shutdown(self)
     end
 
     local kill_nginx_cmd = fmt("kill -s TERM %s", tostring(pid))
-    local status = os.execute(kill_nginx_cmd)
+    local status = shell.run(kill_nginx_cmd, nil, 0)
     if not status then
       error(fmt("could not kill nginx test server. %s was not removed", self.base_path), 2)
     end
@@ -209,8 +249,8 @@ function https_server.shutdown(self)
   return count
 end
 
-
-function https_server.new(port, hostname, protocol, check_hostname, workers, delay)
+-- **DEPRECATED**: please use `spec.helpers.http_mock` instead.
+function https_server.new(port, hostname, protocol, check_hostname, workers, delay, disable_ipv6)
   local self = setmetatable({}, https_server)
   local host
   local hosts
@@ -234,6 +274,7 @@ function https_server.new(port, hostname, protocol, check_hostname, workers, del
   self.logs_dir = "logs"
   self.protocol = protocol or "http"
   self.worker_num = workers or 2
+  self.disable_ipv6 = disable_ipv6
 
   return self
 end

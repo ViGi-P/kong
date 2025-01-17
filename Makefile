@@ -1,153 +1,184 @@
 OS := $(shell uname | awk '{print tolower($$0)}')
 MACHINE := $(shell uname -m)
 
-DEV_ROCKS = "busted 2.0.0" "busted-htest 1.0.0" "luacheck 0.24.0" "lua-llthreads2 0.1.6" "http 0.4" "ldoc 1.4.6"
-WIN_SCRIPTS = "bin/busted" "bin/kong"
+DEV_ROCKS = "busted 2.2.0" "busted-hjtest 0.0.5" "luacheck 1.2.0" "lua-llthreads2 0.1.6" "ldoc 1.5.0" "luacov 0.15.0" "lua-reqwest 0.1.1"
+WIN_SCRIPTS = "bin/busted" "bin/kong" "bin/kong-health"
 BUSTED_ARGS ?= -v
 TEST_CMD ?= bin/busted $(BUSTED_ARGS)
 
+BUILD_NAME ?= kong-dev
+
 ifeq ($(OS), darwin)
-OPENSSL_DIR ?= /usr/local/opt/openssl
+OPENSSL_DIR ?= $(shell brew --prefix)/opt/openssl
 GRPCURL_OS ?= osx
+YAML_DIR ?= $(shell brew --prefix)/opt/libyaml
+EXPAT_DIR ?= $(HOMEBREW_DIR)/opt/expat
 else
 OPENSSL_DIR ?= /usr
 GRPCURL_OS ?= $(OS)
+YAML_DIR ?= /usr
+EXPAT_DIR ?= $(LIBRARY_PREFIX)
 endif
 
-.PHONY: install dependencies dev remove grpcurl \
-	setup-ci setup-kong-build-tools \
+ifeq ($(MACHINE), aarch64)
+GRPCURL_MACHINE ?= arm64
+H2CLIENT_MACHINE ?= arm64
+else
+GRPCURL_MACHINE ?= $(MACHINE)
+H2CLIENT_MACHINE ?= $(MACHINE)
+endif
+
+ifeq ($(MACHINE), aarch64)
+BAZELISK_MACHINE ?= arm64
+else ifeq ($(MACHINE), x86_64)
+BAZELISK_MACHINE ?= amd64
+else
+BAZELISK_MACHINE ?= $(MACHINE)
+endif
+
+.PHONY: install dev \
 	lint test test-integration test-plugins test-all \
 	pdk-phase-check functional-tests \
-	fix-windows \
-	nightly-release release
+	fix-windows release wasm-test-filters test-logs
 
 ROOT_DIR:=$(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
 KONG_SOURCE_LOCATION ?= $(ROOT_DIR)
-KONG_BUILD_TOOLS_LOCATION ?= $(KONG_SOURCE_LOCATION)/../kong-build-tools
-RESTY_VERSION ?= `grep RESTY_VERSION $(KONG_SOURCE_LOCATION)/.requirements | awk -F"=" '{print $$2}'`
-RESTY_LUAROCKS_VERSION ?= `grep RESTY_LUAROCKS_VERSION $(KONG_SOURCE_LOCATION)/.requirements | awk -F"=" '{print $$2}'`
-RESTY_OPENSSL_VERSION ?= `grep RESTY_OPENSSL_VERSION $(KONG_SOURCE_LOCATION)/.requirements | awk -F"=" '{print $$2}'`
-RESTY_PCRE_VERSION ?= `grep RESTY_PCRE_VERSION $(KONG_SOURCE_LOCATION)/.requirements | awk -F"=" '{print $$2}'`
-KONG_BUILD_TOOLS ?= `grep KONG_BUILD_TOOLS_VERSION $(KONG_SOURCE_LOCATION)/.requirements | awk -F"=" '{print $$2}'`
-GRPCURL_VERSION ?= 1.8.2
-OPENRESTY_PATCHES_BRANCH ?= master
-KONG_NGINX_MODULE_BRANCH ?= master
+GRPCURL_VERSION ?= 1.8.5
+BAZLISK_VERSION ?= 1.20.0
+H2CLIENT_VERSION ?= 0.4.4
+BAZEL := $(shell command -v bazel 2> /dev/null)
+VENV = /dev/null # backward compatibility when no venv is built
+
+# Use x86_64 grpcurl v1.8.5 for Apple silicon chips
+ifeq ($(GRPCURL_OS)_$(MACHINE)_$(GRPCURL_VERSION), osx_arm64_1.8.5)
+GRPCURL_MACHINE = x86_64
+endif
 
 PACKAGE_TYPE ?= deb
-REPOSITORY_NAME ?= kong-${PACKAGE_TYPE}
-REPOSITORY_OS_NAME ?= ${RESTY_IMAGE_BASE}
-KONG_PACKAGE_NAME ?= kong
-# This logic should mirror the kong-build-tools equivalent
-KONG_VERSION ?= `echo $(KONG_SOURCE_LOCATION)/kong-*.rockspec | sed 's,.*/,,' | cut -d- -f2`
 
-TAG := $(shell git describe --exact-match HEAD || true)
-
-ifneq ($(TAG),)
-	# We're building a tag
-	ISTAG = true
-	POSSIBLE_PRERELEASE_NAME = $(shell git describe --tags --abbrev=0 | awk -F"-" '{print $$2}')
-	ifneq ($(POSSIBLE_PRERELEASE_NAME),)
-		# We're building a pre-release tag
-		OFFICIAL_RELEASE = false
-		REPOSITORY_NAME = kong-prerelease
-	else
-		# We're building a semver release tag
-		OFFICIAL_RELEASE = true
-		KONG_VERSION ?= `cat $(KONG_SOURCE_LOCATION)/kong-*.rockspec | grep -m1 tag | awk '{print $$3}' | sed 's/"//g'`
-		ifeq ($(PACKAGE_TYPE),apk)
-		    REPOSITORY_NAME = kong-alpine-tar
-		endif
-	endif
-else
-	OFFICIAL_RELEASE = false
-	ISTAG = false
-	BRANCH ?= $(shell git rev-parse --abbrev-ref HEAD)
-	REPOSITORY_NAME = kong-${BRANCH}
-	REPOSITORY_OS_NAME = ${BRANCH}
-	KONG_PACKAGE_NAME ?= kong-${BRANCH}
-	KONG_VERSION ?= `date +%Y-%m-%d`
-endif
-
-release:
-ifeq ($(ISTAG),false)
-	sed -i -e '/return string\.format/,/\"\")/c\return "$(KONG_VERSION)\"' kong/meta.lua
-endif
-	cd $(KONG_BUILD_TOOLS_LOCATION); \
-	$(MAKE) \
-	KONG_VERSION=${KONG_VERSION} \
-	KONG_PACKAGE_NAME=${KONG_PACKAGE_NAME} \
-	package-kong && \
-	$(MAKE) \
-	KONG_VERSION=${KONG_VERSION} \
-	KONG_PACKAGE_NAME=${KONG_PACKAGE_NAME} \
-	REPOSITORY_NAME=${REPOSITORY_NAME} \
-	REPOSITORY_OS_NAME=${REPOSITORY_OS_NAME} \
-	KONG_PACKAGE_NAME=${KONG_PACKAGE_NAME} \
-	KONG_VERSION=${KONG_VERSION} \
-	OFFICIAL_RELEASE=$(OFFICIAL_RELEASE) \
-	release-kong
-
-setup-ci:
-	OPENRESTY=$(RESTY_VERSION) \
-	LUAROCKS=$(RESTY_LUAROCKS_VERSION) \
-	OPENSSL=$(RESTY_OPENSSL_VERSION) \
-	OPENRESTY_PATCHES_BRANCH=$(OPENRESTY_PATCHES_BRANCH) \
-	KONG_NGINX_MODULE_BRANCH=$(KONG_NGINX_MODULE_BRANCH) \
-	.ci/setup_env.sh
-
-setup-kong-build-tools:
-	-rm -rf $(KONG_BUILD_TOOLS_LOCATION)
-	-git clone https://github.com/Kong/kong-build-tools.git $(KONG_BUILD_TOOLS_LOCATION)
-	cd $(KONG_BUILD_TOOLS_LOCATION); \
-	git reset --hard && git checkout $(KONG_BUILD_TOOLS); \
-
-functional-tests: setup-kong-build-tools
-	cd $(KONG_BUILD_TOOLS_LOCATION); \
-	$(MAKE) setup-build && \
-	$(MAKE) build-kong && \
-	$(MAKE) test
-
-install:
-	@luarocks make OPENSSL_DIR=$(OPENSSL_DIR) CRYPTO_DIR=$(OPENSSL_DIR)
-
-remove:
-	-@luarocks remove kong
-
-dependencies: bin/grpcurl
-	@for rock in $(DEV_ROCKS) ; do \
-	  if luarocks list --porcelain $$rock | grep -q "installed" ; then \
-	    echo $$rock already installed, skipping ; \
-	  else \
-	    echo $$rock not found, installing via luarocks... ; \
-	    luarocks install $$rock OPENSSL_DIR=$(OPENSSL_DIR) CRYPTO_DIR=$(OPENSSL_DIR); \
-	  fi \
-	done;
+bin/bazel:
+	@curl -s -S -L \
+		https://github.com/bazelbuild/bazelisk/releases/download/v$(BAZLISK_VERSION)/bazelisk-$(OS)-$(BAZELISK_MACHINE) -o bin/bazel
+	@chmod +x bin/bazel
 
 bin/grpcurl:
 	@curl -s -S -L \
-		https://github.com/fullstorydev/grpcurl/releases/download/v$(GRPCURL_VERSION)/grpcurl_$(GRPCURL_VERSION)_$(GRPCURL_OS)_$(MACHINE).tar.gz | tar xz -C bin;
-	@rm bin/LICENSE
+		https://github.com/fullstorydev/grpcurl/releases/download/v$(GRPCURL_VERSION)/grpcurl_$(GRPCURL_VERSION)_$(GRPCURL_OS)_$(GRPCURL_MACHINE).tar.gz | tar xz -C bin;
+	@$(RM) bin/LICENSE
 
-dev: remove install dependencies
+bin/h2client:
+	@curl -s -S -L \
+		https://github.com/Kong/h2client/releases/download/v$(H2CLIENT_VERSION)/h2client_$(H2CLIENT_VERSION)_$(OS)_$(H2CLIENT_MACHINE).tar.gz | tar xz -C bin;
+	@$(RM) bin/README.md
 
-lint:
-	@luacheck -q .
+install-rust-toolchain:
+	@if command -v cargo; then \
+		echo "Rust is already installed in the local directory, skipping"; \
+	else \
+		echo "Installing Rust..."; \
+		curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path; \
+		. $$HOME/.cargo/env; \
+		rustup toolchain install stable; \
+		rustup default stable; \
+	fi
+
+
+check-bazel: bin/bazel
+ifndef BAZEL
+	$(eval BAZEL := bin/bazel)
+endif
+
+wasm-test-filters:
+	./scripts/build-wasm-test-filters.sh
+
+build-kong: check-bazel
+	$(BAZEL) build //build:kong --verbose_failures --action_env=BUILD_NAME=$(BUILD_NAME)
+
+build-venv: check-bazel
+	$(eval VENV := bazel-bin/build/$(BUILD_NAME)-venv.sh)
+
+	@if [ ! -e bazel-bin/build/$(BUILD_NAME)-venv.sh ]; then \
+		$(BAZEL) build //build:venv --verbose_failures --action_env=BUILD_NAME=$(BUILD_NAME); \
+	fi
+
+build-openresty: check-bazel
+
+	@if [ ! -e bazel-bin/build/$(BUILD_NAME)/openresty ]; then \
+		$(BAZEL) build //build:install-openresty --verbose_failures --action_env=BUILD_NAME=$(BUILD_NAME); \
+	else \
+		$(BAZEL) build //build:dev-make-openresty --verbose_failures --action_env=BUILD_NAME=$(BUILD_NAME); \
+	fi
+
+install-dev-rocks: build-venv
+	@. $(VENV) ;\
+	export PATH=$$PATH:$$HOME/.cargo/bin; \
+	for rock in $(DEV_ROCKS) ; do \
+	  if luarocks list --porcelain $$rock | grep -q "installed" ; then \
+		echo $$rock already installed, skipping ; \
+	  else \
+		echo $$rock not found, installing via luarocks... ; \
+		LIBRARY_PREFIX=$$(pwd)/bazel-bin/build/$(BUILD_NAME)/kong ; \
+		luarocks install $$rock OPENSSL_DIR=$$LIBRARY_PREFIX CRYPTO_DIR=$$LIBRARY_PREFIX YAML_DIR=$(YAML_DIR) || exit 1; \
+	  fi \
+	done;
+
+dev: install-rust-toolchain build-venv install-dev-rocks bin/grpcurl bin/h2client wasm-test-filters
+
+build-release: check-bazel
+	$(BAZEL) clean --expunge
+	$(BAZEL) build //build:kong --verbose_failures --config release
+
+package/deb: check-bazel build-release
+	$(BAZEL) build --config release :kong_deb
+
+package/rpm: check-bazel build-release
+	$(BAZEL) build --config release :kong_el8 --action_env=RPM_SIGNING_KEY_FILE --action_env=NFPM_RPM_PASSPHRASE
+	$(BAZEL) build --config release :kong_aws2	--action_env=RPM_SIGNING_KEY_FILE --action_env=NFPM_RPM_PASSPHRASE
+	$(BAZEL) build --config release :kong_aws2022 --action_env=RPM_SIGNING_KEY_FILE --action_env=NFPM_RPM_PASSPHRASE
+
+functional-tests: dev test
+
+install: dev
+	@$(VENV) luarocks make
+
+clean: check-bazel
+	$(BAZEL) clean
+	$(RM) bin/bazel bin/grpcurl bin/h2client
+
+expunge: check-bazel
+	$(BAZEL) clean --expunge
+	$(RM) bin/bazel bin/grpcurl bin/h2client
+
+lint: dev
+	@$(VENV) luacheck -q .
 	@!(grep -R -E -I -n -w '#only|#o' spec && echo "#only or #o tag detected") >&2
 	@!(grep -R -E -I -n -- '---\s+ONLY' t && echo "--- ONLY block detected") >&2
 
-test:
-	@$(TEST_CMD) spec/01-unit
+update-copyright: build-venv
+	bash -c 'OPENSSL_DIR=$(OPENSSL_DIR) EXPAT_DIR=$(EXPAT_DIR) $(VENV) luajit $(KONG_SOURCE_LOCATION)/scripts/update-copyright'
 
-test-integration:
-	@$(TEST_CMD) spec/02-integration
+test: dev
+	@$(VENV) $(TEST_CMD) spec/01-unit
 
-test-plugins:
-	@$(TEST_CMD) spec/03-plugins
+test-integration: dev
+	@$(VENV) $(TEST_CMD) spec/02-integration
 
-test-all:
-	@$(TEST_CMD) spec/
+test-plugins: dev
+	@$(VENV) $(TEST_CMD) spec/03-plugins
 
-pdk-phase-checks:
+test-all: dev
+	@$(VENV) $(TEST_CMD) spec/
+
+test-custom: dev
+ifndef test_spec
+	$(error test_spec variable needs to be set, i.e. make test-custom test_spec=foo/bar/baz_spec.lua)
+endif
+	@$(VENV) $(TEST_CMD) $(test_spec)
+
+test-logs:
+	tail -F servroot/logs/error.log
+
+pdk-phase-checks: dev
 	rm -f t/phase_checks.stats
 	rm -f t/phase_checks.report
 	PDK_PHASE_CHECKS_LUACOV=1 prove -I. t/01*/*/00-phase*.t
@@ -163,3 +194,27 @@ fix-windows:
 	  rm $$script.win ; \
 	  chmod 0755 $$script ; \
 	done;
+
+# the following targets are kept for backwards compatibility
+# dev is renamed to dev-legacy
+remove:
+	$(warning 'remove' target is deprecated, please use `make dev` instead)
+	-@luarocks remove kong
+
+dependencies: install-rust-toolchain bin/grpcurl bin/h2client
+	$(warning 'dependencies' target is deprecated, this is now not needed when using `make dev`, but are kept for installation that are not built by Bazel)
+
+	export PATH=$$PATH:$$HOME/.cargo/bin; \
+	for rock in $(DEV_ROCKS) ; do \
+	  if luarocks list --porcelain $$rock | grep -q "installed" ; then \
+		echo $$rock already installed, skipping ; \
+	  else \
+		echo $$rock not found, installing via luarocks... ; \
+		luarocks install $$rock OPENSSL_DIR=$(OPENSSL_DIR) CRYPTO_DIR=$(OPENSSL_DIR) YAML_DIR=$(YAML_DIR) || exit 1; \
+	  fi \
+	done;
+
+install-legacy:
+	@luarocks make OPENSSL_DIR=$(OPENSSL_DIR) CRYPTO_DIR=$(OPENSSL_DIR) YAML_DIR=$(YAML_DIR)
+
+dev-legacy: remove install-legacy dependencies

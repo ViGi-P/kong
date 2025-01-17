@@ -1,6 +1,7 @@
 -- Copyright (c) Kong Inc. 2020
 
 local deco = require "kong.plugins.grpc-gateway.deco"
+local kong_meta = require "kong.meta"
 
 local ngx = ngx
 local kong = kong
@@ -20,10 +21,8 @@ local kong_service_request_set_raw_body = kong.service.request.set_raw_body
 
 local grpc_gateway = {
   PRIORITY = 998,
-  VERSION = '0.1.3',
+  VERSION = kong_meta.version,
 }
-
---require "lua_pack"
 
 
 local CORS_HEADERS = {
@@ -121,7 +120,7 @@ function grpc_gateway:body_filter(conf)
   if not ret or #ret == 0 then
     if ngx_arg[2] then
       -- it's eof and we still cannot decode, fall through
-      ret = deco:get_raw_downstream_body()
+      ret = dec:get_raw_downstream_body()
     else
       -- clear output if we cannot decode, it could be body is not complete yet
       ret = nil

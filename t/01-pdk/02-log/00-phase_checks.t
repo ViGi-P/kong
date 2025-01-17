@@ -1,7 +1,7 @@
 use strict;
 use warnings FATAL => 'all';
 use Test::Nginx::Socket::Lua;
-use t::Util;
+do "./t/Util.pm";
 
 $ENV{TEST_NGINX_NXSOCK} ||= html_dir();
 
@@ -62,6 +62,15 @@ qq{
                           get_query = function() return "query" end,
                           get_method = function() return "GET" end,
                           get_headers = function() return {} end,
+                          get_start_time = function() return 1 end,
+                        },
+                       response = {
+                          get_source = function() return "service" end,
+                        },
+                       service = {
+                          response = {
+                            get_status = function() return 200 end,
+                          },
                         },
                      }
                   }
@@ -228,5 +237,3 @@ qq{
 GET /t
 --- no_error_log
 [error]
-
-

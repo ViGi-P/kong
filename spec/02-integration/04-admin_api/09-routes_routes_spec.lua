@@ -1,5 +1,5 @@
 local cjson   = require "cjson"
-local utils   = require "kong.tools.utils"
+local uuid   = require "kong.tools.uuid"
 local helpers = require "spec.helpers"
 local Errors  = require "kong.db.errors"
 
@@ -35,7 +35,7 @@ for _, strategy in helpers.each_strategy() do
     end)
 
     lazy_teardown(function()
-      helpers.stop_kong(nil, true)
+      helpers.stop_kong()
     end)
 
     before_each(function()
@@ -49,6 +49,22 @@ for _, strategy in helpers.each_strategy() do
     end)
 
     describe("/routes", function()
+      describe("OPTIONS", function()
+        it("returns allow and CORS headers with OPTIONS method", function()
+          local res = assert(client:send {
+            method = "OPTIONS",
+            path = "/routes"
+          })
+
+          local body = assert.res_status(204, res)
+          assert.equal("", body)
+          assert.equal("GET, HEAD, OPTIONS, POST", res.headers["Allow"])
+          assert.equal("GET, HEAD, OPTIONS, POST", res.headers["Access-Control-Allow-Methods"])
+          assert.equal("Content-Type", res.headers["Access-Control-Allow-Headers"])
+          assert.equal("*", res.headers["Access-Control-Allow-Origin"])
+          assert.not_nil(res.headers["X-Kong-Admin-Latency"])
+        end)
+      end)
       describe("POST", function()
         it_content_types("creates a route", function(content_type)
           return function()
@@ -60,7 +76,7 @@ for _, strategy in helpers.each_strategy() do
             local res = client:post("/routes", {
               body = {
                 protocols = { "http" },
-                hosts     = { "my.route.com" },
+                hosts     = { "my.route.test" },
                 headers   = { location = { "my-location" } },
                 service   = bp.services:insert(),
               },
@@ -68,7 +84,7 @@ for _, strategy in helpers.each_strategy() do
             })
             local body = assert.res_status(201, res)
             local json = cjson.decode(body)
-            assert.same({ "my.route.com" }, json.hosts)
+            assert.same({ "my.route.test" }, json.hosts)
             assert.same({ location = { "my-location" } }, json.headers)
             assert.is_number(json.created_at)
             assert.is_number(json.regex_priority)
@@ -90,14 +106,14 @@ for _, strategy in helpers.each_strategy() do
             local res = client:post("/routes", {
               body = {
                 protocols = { "grpc", "grpcs" },
-                hosts     = { "my.route.com" },
+                hosts     = { "my.route.test" },
                 service   = bp.services:insert(),
               },
               headers = { ["Content-Type"] = content_type }
             })
             local body = assert.res_status(201, res)
             local json = cjson.decode(body)
-            assert.same({ "my.route.com" }, json.hosts)
+            assert.same({ "my.route.test" }, json.hosts)
             assert.is_number(json.created_at)
             assert.is_number(json.regex_priority)
             assert.is_string(json.id)
@@ -119,13 +135,13 @@ for _, strategy in helpers.each_strategy() do
             local res = client:post("/routes", {
               body = {
                 protocols = { "http" },
-                hosts     = { "my.route.com" },
+                hosts     = { "my.route.test" },
               },
               headers = { ["Content-Type"] = content_type }
             })
             local body = assert.res_status(201, res)
             local json = cjson.decode(body)
-            assert.same({ "my.route.com" }, json.hosts)
+            assert.same({ "my.route.test" }, json.hosts)
             assert.is_number(json.created_at)
             assert.is_number(json.regex_priority)
             assert.is_string(json.id)
@@ -147,13 +163,13 @@ for _, strategy in helpers.each_strategy() do
             local res = client:post("/routes", {
               body = {
                 protocols = { "grpc", "grpcs" },
-                hosts     = { "my.route.com" },
+                hosts     = { "my.route.test" },
               },
               headers = { ["Content-Type"] = content_type }
             })
             local body = assert.res_status(201, res)
             local json = cjson.decode(body)
-            assert.same({ "my.route.com" }, json.hosts)
+            assert.same({ "my.route.test" }, json.hosts)
             assert.is_number(json.created_at)
             assert.is_number(json.regex_priority)
             assert.is_string(json.id)
@@ -178,7 +194,7 @@ for _, strategy in helpers.each_strategy() do
               body    = {
                 protocols = { "http" },
                 methods   = { "GET", "POST", "PATCH" },
-                hosts     = { "foo.api.com", "bar.api.com" },
+                hosts     = { "foo.api.test", "bar.api.test" },
                 paths     = { "/foo", "/bar" },
                 service   = { id = s.id },
               },
@@ -187,7 +203,7 @@ for _, strategy in helpers.each_strategy() do
 
             local body = assert.res_status(201, res)
             local json = cjson.decode(body)
-            assert.same({ "foo.api.com", "bar.api.com" }, json.hosts)
+            assert.same({ "foo.api.test", "bar.api.test" }, json.hosts)
             assert.same({ "/foo","/bar" }, json.paths)
             assert.same({ "GET", "POST", "PATCH" }, json.methods)
             assert.same(s.id, json.service.id)
@@ -205,7 +221,7 @@ for _, strategy in helpers.each_strategy() do
             local res = client:post("/routes", {
               body    = {
                 protocols = { "grpc", "grpcs" },
-                hosts     = { "foo.api.com", "bar.api.com" },
+                hosts     = { "foo.api.test", "bar.api.test" },
                 paths     = { "/foo", "/bar" },
                 service   = { id = s.id },
               },
@@ -214,7 +230,7 @@ for _, strategy in helpers.each_strategy() do
 
             local body = assert.res_status(201, res)
             local json = cjson.decode(body)
-            assert.same({ "foo.api.com", "bar.api.com" }, json.hosts)
+            assert.same({ "foo.api.test", "bar.api.test" }, json.hosts)
             assert.same({ "/foo","/bar" }, json.paths)
             assert.same(s.id, json.service.id)
             assert.same({ "grpc", "grpcs"}, json.protocols)
@@ -233,7 +249,7 @@ for _, strategy in helpers.each_strategy() do
               body    = {
                 protocols = { "http" },
                 methods   = { "GET", "POST", "PATCH" },
-                hosts     = { "foo.api.com", "bar.api.com" },
+                hosts     = { "foo.api.test", "bar.api.test" },
                 paths     = { "/foo", "/bar" },
                 service   = { name = s.name },
               },
@@ -242,7 +258,7 @@ for _, strategy in helpers.each_strategy() do
 
             local body = assert.res_status(201, res)
             local json = cjson.decode(body)
-            assert.same({ "foo.api.com", "bar.api.com" }, json.hosts)
+            assert.same({ "foo.api.test", "bar.api.test" }, json.hosts)
             assert.same({ "/foo","/bar" }, json.paths)
             assert.same({ "GET", "POST", "PATCH" }, json.methods)
             assert.same(s.id, json.service.id)
@@ -260,7 +276,7 @@ for _, strategy in helpers.each_strategy() do
             local res = client:post("/routes", {
               body    = {
                 protocols = { "grpc", "grpcs" },
-                hosts     = { "foo.api.com", "bar.api.com" },
+                hosts     = { "foo.api.test", "bar.api.test" },
                 paths     = { "/foo", "/bar" },
                 service   = { name = s.name },
               },
@@ -269,7 +285,7 @@ for _, strategy in helpers.each_strategy() do
 
             local body = assert.res_status(201, res)
             local json = cjson.decode(body)
-            assert.same({ "foo.api.com", "bar.api.com" }, json.hosts)
+            assert.same({ "foo.api.test", "bar.api.test" }, json.hosts)
             assert.same({ "/foo","/bar" }, json.paths)
             assert.same(s.id, json.service.id)
             assert.same({ "grpc", "grpcs"}, json.protocols)
@@ -348,9 +364,9 @@ for _, strategy in helpers.each_strategy() do
                 code    = Errors.codes.SCHEMA_VIOLATION,
                 name    = "schema violation",
                 message = "schema violation " ..
-                          "(protocols.1: expected one of: grpc, grpcs, http, https, tcp, tls, udp)",
+                          "(protocols.1: expected one of: grpc, grpcs, http, https, tcp, tls, tls_passthrough, udp)",
                 fields = {
-                  protocols = { "expected one of: grpc, grpcs, http, https, tcp, tls, udp" },
+                  protocols = { "expected one of: grpc, grpcs, http, https, tcp, tls, tls_passthrough, udp" },
                 }
               }, cjson.decode(body))
 
@@ -368,12 +384,12 @@ for _, strategy in helpers.each_strategy() do
                 code    = Errors.codes.SCHEMA_VIOLATION,
                 name    = "schema violation",
                 message = "2 schema violations " ..
-                  "(protocols.1: expected one of: grpc, grpcs, http, https, tcp, tls, udp; " ..
-                  "service.protocol: expected one of: grpc, grpcs, http, https, tcp, tls, udp)",
+                  "(protocols.1: expected one of: grpc, grpcs, http, https, tcp, tls, tls_passthrough, udp; " ..
+                  "service.protocol: expected one of: grpc, grpcs, http, https, tcp, tls, tls_passthrough, udp)",
                 fields = {
-                  protocols = { "expected one of: grpc, grpcs, http, https, tcp, tls, udp" },
+                  protocols = { "expected one of: grpc, grpcs, http, https, tcp, tls, tls_passthrough, udp" },
                   service = {
-                    protocol = "expected one of: grpc, grpcs, http, https, tcp, tls, udp"
+                    protocol = "expected one of: grpc, grpcs, http, https, tcp, tls, tls_passthrough, udp"
                   }
                 }
               }, cjson.decode(body))
@@ -600,6 +616,23 @@ for _, strategy in helpers.each_strategy() do
       end)
 
       describe("/routes/{route}", function()
+        describe("OPTIONS", function()
+          it("returns allow and CORS headers with OPTIONS method", function()
+            local res = assert(client:send {
+              method = "OPTIONS",
+              path = "/routes/test"
+            })
+
+            local body = assert.res_status(204, res)
+            assert.equal("", body)
+            assert.equal("DELETE, GET, HEAD, OPTIONS, PATCH, PUT", res.headers["Allow"])
+            assert.equal("DELETE, GET, HEAD, OPTIONS, PATCH, PUT", res.headers["Access-Control-Allow-Methods"])
+            assert.equal("Content-Type", res.headers["Access-Control-Allow-Headers"])
+            assert.equal("*", res.headers["Access-Control-Allow-Origin"])
+            assert.not_nil(res.headers["X-Kong-Admin-Latency"])
+          end)
+        end)
+
         describe("GET", function()
           it("retrieves by id", function()
             local route = bp.routes:insert({ paths = { "/my-route" } }, { nulls = true })
@@ -635,7 +668,7 @@ for _, strategy in helpers.each_strategy() do
           end)
 
           it("returns 404 if not found", function()
-            local res = client:get("/routes/" .. utils.uuid())
+            local res = client:get("/routes/" .. uuid.uuid())
             assert.res_status(404, res)
           end)
 
@@ -676,7 +709,7 @@ for _, strategy in helpers.each_strategy() do
               end
 
               local service = bp.services:insert()
-              local id = utils.uuid()
+              local id = uuid.uuid()
               local res = client:put("/routes/" .. id, {
                 headers = {
                   ["Content-Type"] = content_type
@@ -705,7 +738,7 @@ for _, strategy in helpers.each_strategy() do
                 return
               end
 
-              local id = utils.uuid()
+              local id = uuid.uuid()
               local res = client:put("/routes/" .. id, {
                 headers = {
                   ["Content-Type"] = content_type
@@ -781,7 +814,7 @@ for _, strategy in helpers.each_strategy() do
               assert.same(cjson.null, json.methods)
               assert.equal(route.id, json.id)
 
-              local in_db = assert(db.routes:select({ id = route.id }, { nulls = true }))
+              local in_db = assert(db.routes:select(route, { nulls = true }))
               assert.same(json, in_db)
             end
           end)
@@ -817,7 +850,7 @@ for _, strategy in helpers.each_strategy() do
               local in_db = assert(db.routes:select_by_name(route.name, { nulls = true }))
               assert.same(json, in_db)
 
-              db.routes:delete({ id = route.id })
+              db.routes:delete(route)
             end
           end)
 
@@ -863,7 +896,7 @@ for _, strategy in helpers.each_strategy() do
                 end
 
                 -- Missing params
-                local res = client:put("/routes/" .. utils.uuid(), {
+                local res = client:put("/routes/" .. uuid.uuid(), {
                   body = {},
                   headers = { ["Content-Type"] = content_type }
                 })
@@ -883,7 +916,7 @@ for _, strategy in helpers.each_strategy() do
                 }, cjson.decode(body))
 
                 -- Invalid parameter
-                res = client:put("/routes/" .. utils.uuid(), {
+                res = client:put("/routes/" .. uuid.uuid(), {
                   body = {
                     methods   = { "GET" },
                     protocols = { "foo", "http" },
@@ -895,9 +928,9 @@ for _, strategy in helpers.each_strategy() do
                   code    = Errors.codes.SCHEMA_VIOLATION,
                   name    = "schema violation",
                   message = "schema violation " ..
-                    "(protocols.1: expected one of: grpc, grpcs, http, https, tcp, tls, udp)",
+                    "(protocols.1: expected one of: grpc, grpcs, http, https, tcp, tls, tls_passthrough, udp)",
                   fields  = {
-                    protocols = { "expected one of: grpc, grpcs, http, https, tcp, tls, udp" },
+                    protocols = { "expected one of: grpc, grpcs, http, https, tcp, tls, tls_passthrough, udp" },
                   }
                 }, cjson.decode(body))
 
@@ -1025,7 +1058,7 @@ for _, strategy in helpers.each_strategy() do
               assert.same(cjson.null, json.methods)
               assert.equal(route.id, json.id)
 
-              local in_db = assert(db.routes:select({ id = route.id }, { nulls = true }))
+              local in_db = assert(db.routes:select(route, { nulls = true }))
               assert.same(json, in_db)
             end
           end)
@@ -1058,10 +1091,10 @@ for _, strategy in helpers.each_strategy() do
               assert.same(cjson.null, json.methods)
               assert.equal(route.id, json.id)
 
-              local in_db = assert(db.routes:select({ id = route.id }, { nulls = true }))
+              local in_db = assert(db.routes:select(route, { nulls = true }))
               assert.same(json, in_db)
 
-              db.routes:delete({ id = route.id })
+              db.routes:delete(route)
             end
           end)
 
@@ -1081,7 +1114,7 @@ for _, strategy in helpers.each_strategy() do
               assert.True(json.strip_path)
               assert.equal(route.id, json.id)
 
-              local in_db = assert(db.routes:select({id = route.id}, { nulls = true }))
+              local in_db = assert(db.routes:select(route, { nulls = true }))
               assert.same(json, in_db)
             end
           end)
@@ -1111,7 +1144,7 @@ for _, strategy in helpers.each_strategy() do
               assert.same(cjson.null, json.methods)
               assert.equal(route.id, json.id)
 
-              local in_db = assert(db.routes:select({id = route.id}, { nulls = true }))
+              local in_db = assert(db.routes:select(route, { nulls = true }))
               assert.same(json, in_db)
             end
           end)
@@ -1135,7 +1168,7 @@ for _, strategy in helpers.each_strategy() do
             assert.same(cjson.null, json.methods)
             assert.equal(route.id, json.id)
 
-            local in_db = assert(db.routes:select({id = route.id}, { nulls = true }))
+            local in_db = assert(db.routes:select(route, { nulls = true }))
             assert.same(json, in_db)
           end)
 
@@ -1155,16 +1188,10 @@ for _, strategy in helpers.each_strategy() do
             local body = assert.res_status(200, res)
             local json = cjson.decode(body)
 
-            if strategy == "cassandra" then
-              assert.equals(ngx.null, json.paths)
-              assert.equals(ngx.null, json.methods)
-
-            else
-              assert.matches('"methods":%[%]', body)
-              assert.matches('"paths":%[%]', body)
-              assert.same({}, json.paths)
-              assert.same({}, json.methods)
-            end
+            assert.matches('"methods":%[%]', body)
+            assert.matches('"paths":%[%]', body)
+            assert.same({}, json.paths)
+            assert.same({}, json.methods)
 
             assert.same({ "my-updated.tld" }, json.hosts)
             assert.equal(route.id, json.id)
@@ -1200,10 +1227,10 @@ for _, strategy in helpers.each_strategy() do
               assert.same(cjson.null, json.service)
               assert.equal(route.id, json.id)
 
-              local in_db = assert(db.routes:select({ id = route.id }, { nulls = true }))
+              local in_db = assert(db.routes:select(route, { nulls = true }))
               assert.same(json, in_db)
 
-              db.routes:delete({ id = route.id })
+              db.routes:delete(route)
             end
           end)
 
@@ -1215,7 +1242,7 @@ for _, strategy in helpers.each_strategy() do
                   return
                 end
 
-                local res = client:patch("/routes/" .. utils.uuid(), {
+                local res = client:patch("/routes/" .. uuid.uuid(), {
                   headers = {
                     ["Content-Type"] = content_type
                   },
@@ -1261,7 +1288,7 @@ for _, strategy in helpers.each_strategy() do
             local body = assert.res_status(204, res)
             assert.equal("", body)
 
-            local in_db, err = db.routes:select({id = route.id}, { nulls = true })
+            local in_db, err = db.routes:select(route, { nulls = true })
             assert.is_nil(err)
             assert.is_nil(in_db)
           end)
@@ -1275,14 +1302,14 @@ for _, strategy in helpers.each_strategy() do
             local body = assert.res_status(204, res)
             assert.equal("", body)
 
-            local in_db, err = db.routes:select({id = route.id}, { nulls = true })
+            local in_db, err = db.routes:select(route, { nulls = true })
             assert.is_nil(err)
             assert.is_nil(in_db)
           end)
 
           describe("errors", function()
             it("returns HTTP 204 even if not found", function()
-              local res = client:delete("/routes/" .. utils.uuid())
+              local res = client:delete("/routes/" .. uuid.uuid())
               assert.res_status(204, res)
             end)
           end)
@@ -1315,7 +1342,7 @@ for _, strategy in helpers.each_strategy() do
           end)
 
           it("returns 404 if not found", function()
-            local res = client:get("/routes/" .. utils.uuid() .. "/service")
+            local res = client:get("/routes/" .. uuid.uuid() .. "/service")
             assert.res_status(404, res)
           end)
 
@@ -1366,7 +1393,7 @@ for _, strategy in helpers.each_strategy() do
               assert.same(cjson.null,   json.path)
 
 
-              local in_db = assert(db.services:select({ id = service.id }, { nulls = true }))
+              local in_db = assert(db.services:select(service, { nulls = true }))
               assert.same(json, in_db)
             end
           end)
@@ -1399,11 +1426,11 @@ for _, strategy in helpers.each_strategy() do
               assert.same(cjson.null,   json.path)
 
 
-              local in_db = assert(db.services:select({ id = service.id }, { nulls = true }))
+              local in_db = assert(db.services:select(service, { nulls = true }))
               assert.same(json, in_db)
 
-              db.routes:delete({ id = route.id })
-              db.services:delete({ id = service.id })
+              db.routes:delete(route)
+              db.services:delete(service)
             end
           end)
 
@@ -1416,17 +1443,17 @@ for _, strategy in helpers.each_strategy() do
                   ["Content-Type"] = content_type
                 },
                 body = {
-                  url = "http://edited2.com:1234/foo",
+                  url = "http://edited2.test:1234/foo",
                 },
               })
               local body = assert.res_status(200, res)
               local json = cjson.decode(body)
-              assert.equal("edited2.com", json.host)
+              assert.equal("edited2.test", json.host)
               assert.equal(1234,          json.port)
               assert.equal("/foo",        json.path)
 
 
-              local in_db = assert(db.services:select({ id = service.id }, { nulls = true }))
+              local in_db = assert(db.services:select(service, { nulls = true }))
               assert.same(json, in_db)
             end
           end)
@@ -1434,13 +1461,13 @@ for _, strategy in helpers.each_strategy() do
           describe("errors", function()
             it_content_types("returns 404 if not found", function(content_type)
               return function()
-                local res = client:patch("/routes/" .. utils.uuid() .. "/service", {
+                local res = client:patch("/routes/" .. uuid.uuid() .. "/service", {
                   headers = {
                     ["Content-Type"] = content_type
                   },
                   body = {
                     name  = "edited",
-                    host  = "edited.com",
+                    host  = "edited.test",
                     path  = cjson.null,
                   },
                 })
@@ -1484,7 +1511,7 @@ for _, strategy in helpers.each_strategy() do
             end)
 
             it("returns HTTP 404 with non-existing route", function()
-              local res = client:delete("/routes/" .. utils.uuid() .. "/service")
+              local res = client:delete("/routes/" .. uuid.uuid() .. "/service")
               assert.res_status(404, res)
             end)
 
@@ -1510,14 +1537,14 @@ for _, strategy in helpers.each_strategy() do
                 ["Content-Type"] = content_type
               },
               body = {
-                url = "http://httpbin.org",
+                url = "http://konghq.test",
               },
             })
             local body = assert.res_status(200, res)
             local json = cjson.decode(body)
-            assert.same("httpbin.org", json.host)
+            assert.same("konghq.test", json.host)
 
-            local in_db = assert(db.services:select({ id = json.id }, { nulls = true }))
+            local in_db = assert(db.services:select(json, { nulls = true }))
             assert.same(json, in_db)
           end
         end)
@@ -1550,7 +1577,7 @@ for _, strategy in helpers.each_strategy() do
             assert.same(cjson.null,   json.path)
 
 
-            local in_db = assert(db.services:select({ id = service.id }, { nulls = true }))
+            local in_db = assert(db.services:select(service, { nulls = true }))
             assert.same(json, in_db)
           end
         end)
@@ -1583,11 +1610,11 @@ for _, strategy in helpers.each_strategy() do
             assert.same(cjson.null,   json.path)
 
 
-            local in_db = assert(db.services:select({ id = service.id }, { nulls = true }))
+            local in_db = assert(db.services:select(service, { nulls = true }))
             assert.same(json, in_db)
 
-            db.routes:delete({ id = route.id })
-            db.services:delete({ id = service.id })
+            db.routes:delete(route)
+            db.services:delete(service)
           end
         end)
 
@@ -1600,17 +1627,17 @@ for _, strategy in helpers.each_strategy() do
                 ["Content-Type"] = content_type
               },
               body = {
-                url = "http://edited2.com:1234/foo",
+                url = "http://edited2.test:1234/foo",
               },
             })
             local body = assert.res_status(200, res)
             local json = cjson.decode(body)
-            assert.equal("edited2.com", json.host)
+            assert.equal("edited2.test", json.host)
             assert.equal(1234,          json.port)
             assert.equal("/foo",        json.path)
 
 
-            local in_db = assert(db.services:select({ id = service.id }, { nulls = true }))
+            local in_db = assert(db.services:select(service, { nulls = true }))
             assert.same(json, in_db)
           end
         end)
@@ -1618,13 +1645,13 @@ for _, strategy in helpers.each_strategy() do
         describe("errors", function()
           it_content_types("returns 404 if not found", function(content_type)
             return function()
-              local res = client:put("/routes/" .. utils.uuid() .. "/service", {
+              local res = client:put("/routes/" .. uuid.uuid() .. "/service", {
                 headers = {
                   ["Content-Type"] = content_type
                 },
                 body = {
                   name  = "edited",
-                  host  = "edited.com",
+                  host  = "edited.test",
                   path  = cjson.null,
                 },
               })
@@ -1762,8 +1789,7 @@ for _, strategy in helpers.each_strategy() do
               end
             end)
 
-            -- Cassandra doesn't fail on this because its insert is an upsert
-            pending("returns 409 on id conflict (same plugin id)", function(content_type)
+            it("returns 409 on id conflict (same plugin id)", function(content_type)
               return function()
                 local route = bp.routes:insert({ paths = { "/my-route" } })
                 -- insert initial plugin
@@ -1809,7 +1835,7 @@ for _, strategy in helpers.each_strategy() do
             local route = bp.routes:insert({ paths = { "/my-route" } })
             assert(db.plugins:insert {
               name = "key-auth",
-              route = { id = route.id },
+              route = route,
             })
             local res = assert(client:send {
               method = "GET",
@@ -1824,7 +1850,7 @@ for _, strategy in helpers.each_strategy() do
             local route = bp.routes:insert({ name = "my-plugins-route", paths = { "/my-route" } })
             assert(db.plugins:insert {
               name = "key-auth",
-              route = { id = route.id },
+              route = route,
             })
             local res = assert(client:send {
               method = "GET",
@@ -1834,7 +1860,7 @@ for _, strategy in helpers.each_strategy() do
             local json = cjson.decode(body)
             assert.equal(1, #json.data)
 
-            db.routes:delete({ id = route.id })
+            db.routes:delete(route)
           end)
 
           it("ignores an invalid body", function()
@@ -1848,6 +1874,70 @@ for _, strategy in helpers.each_strategy() do
               }
             })
             assert.res_status(200, res)
+          end)
+        end)
+      end)
+
+      describe("/routes/{route}/plugins/{plugin}", function()
+        describe("GET", function()
+          it("retrieves a plugin by id", function()
+            local service = bp.services:insert()
+            local route = bp.routes:insert({
+              service = { id = service.id },
+              hosts = { "example.test" },
+            })
+            local plugin = bp.key_auth_plugins:insert({
+              route = route,
+            })
+            local res = client:get("/routes/" .. route.id .. "/plugins/" .. plugin.id)
+            local body = assert.res_status(200, res)
+            local json = cjson.decode(body)
+            local in_db = assert(db.plugins:select(plugin, { nulls = true }))
+            assert.same(json, in_db)
+          end)
+          it("retrieves a plugin by instance_name", function()
+            local service = bp.services:insert()
+            local route = bp.routes:insert({
+              service = { id = service.id },
+              hosts = { "example.test" },
+            })
+            local plugin = bp.key_auth_plugins:insert({
+              instance_name = "name-" .. uuid.uuid(),
+              route = route,
+            })
+            local res = client:get("/routes/" .. route.id .. "/plugins/" .. plugin.instance_name)
+            local body = assert.res_status(200, res)
+            local json = cjson.decode(body)
+            local in_db = assert(db.plugins:select(plugin, { nulls = true }))
+            assert.same(json, in_db)
+          end)
+        end)
+
+        describe("DELETE", function()
+          it("deletes a plugin by id", function()
+            local route = bp.routes:insert({ paths = { "/route-" .. uuid.uuid() }})
+            local plugin = bp.key_auth_plugins:insert({
+              route = route,
+            })
+            local res = assert(client:delete("/routes/" .. route.id .. "/plugins/" .. plugin.id))
+            assert.res_status(204, res)
+
+            local in_db, err = db.plugins:select(plugin, { nulls = true })
+            assert.is_nil(err)
+            assert.is_nil(in_db)
+          end)
+          it("deletes a plugin by instance_name", function()
+            local route = bp.routes:insert({ paths = { "/route-" .. uuid.uuid() }})
+            local plugin = bp.key_auth_plugins:insert({
+              instance_name = "name-" .. uuid.uuid(),
+              route = route,
+            })
+            local res = assert(client:delete("/routes/" .. route.id .. "/plugins/" .. plugin.instance_name))
+            assert.res_status(204, res)
+
+            local in_db, err = db.plugins:select(plugin, { nulls = true })
+            assert.is_nil(err)
+            assert.is_nil(in_db)
           end)
         end)
       end)
@@ -1876,7 +1966,7 @@ for _, strategy in helpers.each_strategy() do
     end)
 
     lazy_teardown(function()
-      helpers.stop_kong(nil, true)
+      helpers.stop_kong()
     end)
 
     before_each(function()
@@ -1900,7 +1990,7 @@ for _, strategy in helpers.each_strategy() do
             local res = client:post("/routes", {
               body = {
                 protocols = { "http" },
-                hosts     = { "my.route.com" },
+                hosts     = { "my.route.test" },
                 headers   = { location = { "my-location" } },
                 service   = bp.services:insert(),
               },
@@ -1908,7 +1998,7 @@ for _, strategy in helpers.each_strategy() do
             })
             local body = assert.res_status(201, res)
             local json = cjson.decode(body)
-            assert.same({ "my.route.com" }, json.hosts)
+            assert.same({ "my.route.test" }, json.hosts)
             assert.same({ location = { "my-location" } }, json.headers)
             assert.is_number(json.created_at)
             assert.is_number(json.regex_priority)

@@ -1,7 +1,7 @@
 use strict;
 use warnings FATAL => 'all';
 use Test::Nginx::Socket::Lua;
-use t::Util;
+do "./t/Util.pm";
 
 $ENV{TEST_NGINX_NXSOCK} ||= html_dir();
 
@@ -68,7 +68,7 @@ invalid header name "127001": got number, expected string
 --- request
 GET /t
 --- response_body
-invalid header value for "foo": got function, expected string, number or boolean
+invalid header value for "foo": got function, expected array of string, string, number or boolean
 --- no_error_log
 [error]
 
@@ -89,7 +89,7 @@ invalid header value for "foo": got function, expected string, number or boolean
 --- request
 GET /t
 --- response_body
-invalid header value for "foo": got nil, expected string, number or boolean
+invalid header value for "foo": got nil, expected array of string, string, number or boolean
 --- no_error_log
 [error]
 

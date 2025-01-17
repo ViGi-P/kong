@@ -1,16 +1,14 @@
-local utils = require "kong.tools.utils"
+local declarative = require "kong.db.declarative"
+local bytes_to_str = require("kong.tools.string").bytes_to_str
 
-local find = string.find
-local select = select
 local tonumber = tonumber
 local kong = kong
 local knode  = (kong and kong.node) and kong.node or
                require "kong.pdk.node".new()
 
 
-local select = select
-local tonumber = tonumber
-local kong = kong
+local dbless = kong.configuration.database == "off"
+local data_plane_role = kong.configuration.role == "data_plane"
 
 
 return {
@@ -31,38 +29,31 @@ return {
 
         -- validate unit and scale arguments
 
-        local pok, perr = pcall(utils.bytes_to_str, 0, unit, scale)
+        local pok, perr = pcall(bytes_to_str, 0, unit, scale)
         if not pok then
           return kong.response.exit(400, { message = perr })
         end
       end
 
       -- nginx stats
-
-      local r = ngx.location.capture "/nginx_status"
-      if r.status ~= 200 then
-        kong.log.err(r.body)
-        return kong.response.exit(500, { message = "An unexpected error happened" })
-      end
-
-      local var = ngx.var
-      local accepted, handled, total = select(3, find(r.body, "accepts handled requests\n (%d*) (%d*) (%d*)"))
-
       local status_response = {
         memory = knode.get_memory_stats(unit, scale),
-        server = {
-          connections_active = tonumber(var.connections_active),
-          connections_reading = tonumber(var.connections_reading),
-          connections_writing = tonumber(var.connections_writing),
-          connections_waiting = tonumber(var.connections_waiting),
-          connections_accepted = tonumber(accepted),
-          connections_handled = tonumber(handled),
-          total_requests = tonumber(total)
-        },
+        server = kong.nginx.get_statistics(),
         database = {
           reachable = true,
         },
       }
+
+      -- if dbless mode is enabled we provide the current hash of the
+      -- data-plane in the status response as this enables control planes
+      -- to make decisions when something changes in the data-plane (e.g.
+      -- if the gateway gets unexpectedly restarted and its configuration
+      -- has been reset to empty).
+      if dbless or data_plane_role then
+        status_response.configuration_hash = declarative.get_current_hash()
+        -- remove the meanless database entry when in dbless mode or data plane
+        status_response.database = nil
+      end
 
       -- TODO: no way to bypass connection pool
       local ok, err = kong.db:connect()

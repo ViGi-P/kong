@@ -14,8 +14,7 @@ local binaryHeap = require "binaryheap"
 local ngx_log = ngx.log
 local ngx_DEBUG = ngx.DEBUG
 
-local EMPTY = setmetatable({},
-        {__newindex = function() error("The 'EMPTY' table is read-only") end})
+local EMPTY = require("kong.tools.table").EMPTY
 
 
 local lc = {}
@@ -131,7 +130,7 @@ function lc:getPeer(cacheOnly, handle, hashValue)
       break
     end
 
-    if port ~= self.errors.ERR_DNS_UPDATED then
+    if port ~= balancers.errors.ERR_DNS_UPDATED then
       -- an unknown error
       break
     end

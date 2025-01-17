@@ -1,9 +1,12 @@
 local cjson = require "cjson.safe"
-local utils = require "kong.tools.utils"
+local system = require "kong.tools.system"
+local rand = require "kong.tools.rand"
 local constants = require "kong.constants"
 local counter = require "resty.counter"
 local knode = (kong and kong.node) and kong.node or
               require "kong.pdk.node".new()
+
+local ai_plugin_o11y = require "kong.llm.plugin.observability"
 
 
 local kong_dict = ngx.shared.kong
@@ -20,6 +23,7 @@ local pairs = pairs
 local error = error
 local type = type
 local WARN = ngx.WARN
+local DEBUG = ngx.DEBUG
 local sub = string.sub
 
 
@@ -44,14 +48,38 @@ local TLS_STREAM_COUNT_KEY    = "events:streams:tls"
 local UDP_STREAM_COUNT_KEY    = "events:streams:udp"
 
 
+local KM_VISIT_COUNT_KEY      = "events:km:visit"
+
+
 local GO_PLUGINS_REQUEST_COUNT_KEY = "events:requests:go_plugins"
+local WASM_REQUEST_COUNT_KEY = "events:requests:wasm"
+
+
+local AI_RESPONSE_TOKENS_COUNT_KEY = "events:ai:response_tokens"
+local AI_PROMPT_TOKENS_COUNT_KEY   = "events:ai:prompt_tokens"
+local AI_REQUEST_COUNT_KEY         = "events:ai:requests"
+
+
+local ROUTE_CACHE_HITS_KEY = "route_cache_hits"
+local STEAM_ROUTE_CACHE_HITS_KEY_POS = STREAM_COUNT_KEY .. ":" .. ROUTE_CACHE_HITS_KEY .. ":pos"
+local STEAM_ROUTE_CACHE_HITS_KEY_NEG = STREAM_COUNT_KEY .. ":" .. ROUTE_CACHE_HITS_KEY .. ":neg"
+local REQUEST_ROUTE_CACHE_HITS_KEY_POS = REQUEST_COUNT_KEY .. ":" .. ROUTE_CACHE_HITS_KEY .. ":pos"
+local REQUEST_ROUTE_CACHE_HITS_KEY_NEG = REQUEST_COUNT_KEY .. ":" .. ROUTE_CACHE_HITS_KEY .. ":neg"
+
+
+local get_header
+if subsystem == "http" then
+  get_header = require("kong.tools.http").get_header
+end
 
 
 local _buffer = {}
 local _ping_infos = {}
 local _enabled = false
-local _unique_str = utils.random_string()
+local _unique_str = rand.random_string()
 local _buffer_immutable_idx
+local _ssl_session
+local _ssl_verify = false
 
 -- the resty.counter instance, will be initialized in `init_worker`
 local report_counter = nil
@@ -61,7 +89,7 @@ do
 
   local meta = require "kong.meta"
 
-  local system_infos = utils.get_system_infos()
+  local system_infos = system.get_system_infos()
 
   system_infos.hostname = system_infos.hostname or knode.get_hostname()
 
@@ -104,14 +132,13 @@ end
 
 local function send_report(signal_type, t, host, port)
   if not _enabled then
-    return
+    return nil, "disabled"
   elseif type(signal_type) ~= "string" then
     return error("signal_type (arg #1) must be a string", 2)
   end
-
   t = t or {}
   host = host or constants.REPORTS.ADDRESS
-  port = port or constants.REPORTS.STATS_PORT
+  port = port or constants.REPORTS.STATS_TLS_PORT
 
   -- add signal type to data
 
@@ -139,13 +166,32 @@ local function send_report(signal_type, t, host, port)
   -- errors are not logged to avoid false positives for users
   -- who run Kong in an air-gapped environments
 
-  local ok = sock:connect(host, port)
+  local ok, err
+  ok, err = sock:connect(host, port)
   if not ok then
-    return
+    sock:close()
+    return nil, err
   end
 
-  sock:send(concat(_buffer, ";", 1, mutable_idx) .. "\n")
-  sock:setkeepalive()
+  ok, err = sock:sslhandshake(_ssl_session, nil, _ssl_verify)
+  if not ok then
+    log(DEBUG, "failed to complete SSL handshake for reports: ", err)
+    sock:close()
+    return nil, "failed to complete SSL handshake for reports: " .. err
+  end
+
+  _ssl_session = ok
+
+  -- send return nil plus err msg on failure
+  local bytes, err = sock:send(concat(_buffer, ";", 1, mutable_idx) .. "\n")
+  if bytes then
+    local ok, err = sock:setkeepalive()
+    if not ok then
+      log(DEBUG, "failed to keepalive to ", host, ":", tostring(port), ": ", err)
+      sock:close()
+    end
+  end
+  return bytes, err
 end
 
 
@@ -201,8 +247,12 @@ local function reset_counter(key, amount)
 end
 
 
-local function incr_counter(key)
-  local ok, err = report_counter:incr(key, 1)
+local function incr_counter(key, hit)
+  if not hit then 
+    hit = 1
+  end
+
+  local ok, err = report_counter:incr(key, hit)
   if not ok then
     log(WARN, "could not increment ", key, " in 'kong' shm: ", err)
   end
@@ -220,7 +270,7 @@ function get_current_suffix(ctx)
   local proxy_mode = var.kong_proxy_mode
   if scheme == "http" or scheme == "https" then
     if proxy_mode == "http" or proxy_mode == "unbuffered" then
-      local http_upgrade = var.http_upgrade
+      local http_upgrade = get_header("upgrade", ctx)
       if http_upgrade and lower(http_upgrade) == "websocket" then
         if scheme == "http" then
           return "ws"
@@ -255,6 +305,12 @@ function get_current_suffix(ctx)
     return nil
   end
 
+  -- 400 case is for invalid requests, eg: if a client sends a HTTP
+  -- request to a HTTPS port, it does not initialized any Nginx variables
+  if proxy_mode == "" and kong.response.get_status() == 400 then
+    return nil
+  end
+
   log(WARN, "could not determine log suffix (scheme=", tostring(scheme),
             ", proxy_mode=", tostring(proxy_mode), ")")
 end
@@ -283,6 +339,14 @@ local function send_ping(host, port)
     _ping_infos.udp_streams = get_counter(UDP_STREAM_COUNT_KEY)
     _ping_infos.tls_streams = get_counter(TLS_STREAM_COUNT_KEY)
     _ping_infos.go_plugin_reqs = get_counter(GO_PLUGINS_REQUEST_COUNT_KEY)
+    _ping_infos.wasm_reqs = get_counter(WASM_REQUEST_COUNT_KEY)
+
+    _ping_infos.stream_route_cache_hit_pos = get_counter(STEAM_ROUTE_CACHE_HITS_KEY_POS)
+    _ping_infos.stream_route_cache_hit_neg = get_counter(STEAM_ROUTE_CACHE_HITS_KEY_NEG)
+
+    _ping_infos.ai_response_tokens = get_counter(AI_RESPONSE_TOKENS_COUNT_KEY)
+    _ping_infos.ai_prompt_tokens   = get_counter(AI_PROMPT_TOKENS_COUNT_KEY)
+    _ping_infos.ai_reqs            = get_counter(AI_REQUEST_COUNT_KEY)
 
     send_report("ping", _ping_infos, host, port)
 
@@ -291,7 +355,12 @@ local function send_ping(host, port)
     reset_counter(UDP_STREAM_COUNT_KEY, _ping_infos.udp_streams)
     reset_counter(TLS_STREAM_COUNT_KEY, _ping_infos.tls_streams)
     reset_counter(GO_PLUGINS_REQUEST_COUNT_KEY, _ping_infos.go_plugin_reqs)
-
+    reset_counter(WASM_REQUEST_COUNT_KEY, _ping_infos.wasm_reqs)
+    reset_counter(STEAM_ROUTE_CACHE_HITS_KEY_POS, _ping_infos.stream_route_cache_hit_pos)
+    reset_counter(STEAM_ROUTE_CACHE_HITS_KEY_NEG, _ping_infos.stream_route_cache_hit_neg)
+    reset_counter(AI_RESPONSE_TOKENS_COUNT_KEY, _ping_infos.ai_response_tokens)
+    reset_counter(AI_PROMPT_TOKENS_COUNT_KEY, _ping_infos.ai_prompt_tokens)
+    reset_counter(AI_REQUEST_COUNT_KEY, _ping_infos.ai_reqs)
     return
   end
 
@@ -304,7 +373,16 @@ local function send_ping(host, port)
   _ping_infos.grpcs_reqs     = get_counter(GRPCS_REQUEST_COUNT_KEY)
   _ping_infos.ws_reqs        = get_counter(WS_REQUEST_COUNT_KEY)
   _ping_infos.wss_reqs       = get_counter(WSS_REQUEST_COUNT_KEY)
+  _ping_infos.km_visits      = get_counter(KM_VISIT_COUNT_KEY)
   _ping_infos.go_plugin_reqs = get_counter(GO_PLUGINS_REQUEST_COUNT_KEY)
+  _ping_infos.wasm_reqs      = get_counter(WASM_REQUEST_COUNT_KEY)
+
+  _ping_infos.ai_response_tokens = get_counter(AI_RESPONSE_TOKENS_COUNT_KEY)
+  _ping_infos.ai_prompt_tokens   = get_counter(AI_PROMPT_TOKENS_COUNT_KEY)
+  _ping_infos.ai_reqs            = get_counter(AI_REQUEST_COUNT_KEY)
+
+  _ping_infos.request_route_cache_hit_pos = get_counter(REQUEST_ROUTE_CACHE_HITS_KEY_POS)
+  _ping_infos.request_route_cache_hit_neg = get_counter(REQUEST_ROUTE_CACHE_HITS_KEY_NEG)
 
   send_report("ping", _ping_infos, host, port)
 
@@ -317,7 +395,14 @@ local function send_ping(host, port)
   reset_counter(GRPCS_REQUEST_COUNT_KEY, _ping_infos.grpcs_reqs)
   reset_counter(WS_REQUEST_COUNT_KEY,    _ping_infos.ws_reqs)
   reset_counter(WSS_REQUEST_COUNT_KEY,   _ping_infos.wss_reqs)
+  reset_counter(KM_VISIT_COUNT_KEY,      _ping_infos.km_visits)
   reset_counter(GO_PLUGINS_REQUEST_COUNT_KEY, _ping_infos.go_plugin_reqs)
+  reset_counter(WASM_REQUEST_COUNT_KEY,  _ping_infos.wasm_reqs)
+  reset_counter(REQUEST_ROUTE_CACHE_HITS_KEY_POS, _ping_infos.request_route_cache_hit_pos)
+  reset_counter(REQUEST_ROUTE_CACHE_HITS_KEY_NEG, _ping_infos.request_route_cache_hit_neg)
+  reset_counter(AI_RESPONSE_TOKENS_COUNT_KEY, _ping_infos.ai_response_tokens)
+  reset_counter(AI_PROMPT_TOKENS_COUNT_KEY, _ping_infos.ai_prompt_tokens)
+  reset_counter(AI_REQUEST_COUNT_KEY, _ping_infos.ai_reqs)
 end
 
 
@@ -361,6 +446,7 @@ local function configure_ping(kong_conf)
   add_immutable_value("role", kong_conf.role)
   add_immutable_value("kic", kong_conf.kic)
   add_immutable_value("_admin", #kong_conf.admin_listeners > 0 and 1 or 0)
+  add_immutable_value("_admin_gui", #kong_conf.admin_gui_listeners > 0 and 1 or 0)
   add_immutable_value("_proxy", #kong_conf.proxy_listeners > 0 and 1 or 0)
   add_immutable_value("_stream", #kong_conf.stream_listeners > 0 and 1 or 0)
 end
@@ -399,8 +485,11 @@ do
   end
 end
 
-
 return {
+  init = function(kong_conf)
+    _enabled = kong_conf.anonymous_reports or false
+    configure_ping(kong_conf)
+  end,
   -- plugin handler
   init_worker = function()
     if not _enabled then
@@ -434,10 +523,38 @@ return {
       incr_counter(GO_PLUGINS_REQUEST_COUNT_KEY)
     end
 
+    if ctx.ran_wasm then
+      incr_counter(WASM_REQUEST_COUNT_KEY)
+    end
+
+    local llm_prompt_tokens_count = ai_plugin_o11y.metrics_get("llm_prompt_tokens_count")
+    if llm_prompt_tokens_count then
+      incr_counter(AI_REQUEST_COUNT_KEY)
+      incr_counter(AI_PROMPT_TOKENS_COUNT_KEY, llm_prompt_tokens_count)
+    end
+
+    local llm_response_tokens_count = ai_plugin_o11y.metrics_get("llm_completion_tokens_count")
+    if llm_response_tokens_count then
+      incr_counter(AI_RESPONSE_TOKENS_COUNT_KEY, llm_response_tokens_count)
+    end
+
     local suffix = get_current_suffix(ctx)
     if suffix then
       incr_counter(count_key .. ":" .. suffix)
     end
+
+    local route_match_cached = ctx.route_match_cached
+
+    if route_match_cached then
+      incr_counter(count_key .. ":" .. ROUTE_CACHE_HITS_KEY .. ":" .. route_match_cached)
+    end
+  end,
+  admin_gui_log = function(ctx)
+    if not _enabled then
+      return
+    end
+
+    incr_counter(KM_VISIT_COUNT_KEY)
   end,
 
   -- custom methods

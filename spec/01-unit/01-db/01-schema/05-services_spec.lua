@@ -5,8 +5,23 @@ local certificates = require "kong.db.schema.entities.certificates"
 assert(Schema.new(certificates))
 local Services = assert(Schema.new(services))
 
+local function setup_global_env()
+  _G.kong = _G.kong or {}
+  _G.kong.log = _G.kong.log or {
+    debug = function(msg)
+      ngx.log(ngx.DEBUG, msg)
+    end,
+    error = function(msg)
+      ngx.log(ngx.ERR, msg)
+    end,
+    warn = function (msg)
+      ngx.log(ngx.WARN, msg)
+    end
+  }
+end
 
 describe("services", function()
+  setup_global_env()
   local a_valid_uuid = "cbb297c0-a956-486d-ad1d-f9b42df9465a"
   local uuid_pattern = "^" .. ("%x"):rep(8) .. "%-" .. ("%x"):rep(4) .. "%-"
                            .. ("%x"):rep(4) .. "%-" .. ("%x"):rep(4) .. "%-"
@@ -130,6 +145,7 @@ describe("services", function()
         connect_timeout = 1,
         read_timeout    = 10,
         write_timeout   = 100,
+        enabled         = true,
       }
 
       local ok, err = Services:validate(service)
@@ -214,6 +230,7 @@ describe("services", function()
         port = 80,
         protocol = "http",
         path = "/hello/path$with$!&'()*+,;=stuff",
+        enabled = true,
       }
 
       local ok, err = Services:validate(service)
@@ -252,6 +269,7 @@ describe("services", function()
         host = "example.com",
         path = "/",
         port = 80,
+        enabled = true,
       }
 
       local ok, err = Services:validate(service)
@@ -265,6 +283,7 @@ describe("services", function()
         host = "example.com",
         path = "/abcd~user~2",
         port = 80,
+        enabled = true,
       }
 
       local ok, err = Services:validate(service)
@@ -281,6 +300,7 @@ describe("services", function()
           host = "example.com",
           path = valid_paths[i],
           port = 80,
+          enabled = true,
         }
 
         local ok, err = Services:validate(service)
@@ -295,6 +315,7 @@ describe("services", function()
         host = "example.com",
         path = "/ovo/",
         port = 80,
+        enabled = true,
       }
 
       local ok, err = Services:validate(service)
@@ -407,6 +428,7 @@ describe("services", function()
           protocol = "http",
           host = valid_hosts[i],
           port = 80,
+          enabled = true,
         }
 
         local ok, err = Services:validate(service)
@@ -480,7 +502,8 @@ describe("services", function()
           protocol = "http",
           host = "example.com",
           port = 80,
-          name = valid_names[i]
+          name = valid_names[i],
+          enabled = true,
         }
 
         local ok, err = Services:validate(service)
@@ -496,6 +519,7 @@ describe("services", function()
         protocol = "tcp",
         host = "x.y",
         port = 80,
+        enabled = true,
       }
 
       local ok, err = Services:validate(service)
@@ -508,6 +532,7 @@ describe("services", function()
         protocol = "tls",
         host = "x.y",
         port = 80,
+        enabled = true,
       }
 
       local ok, err = Services:validate(service)
@@ -520,6 +545,7 @@ describe("services", function()
         protocol = "udp",
         host = "x.y",
         port = 80,
+        enabled = true,
       }
 
       local ok, err = Services:validate(service)
@@ -532,6 +558,7 @@ describe("services", function()
         protocol = "grpc",
         host = "x.y",
         port = 80,
+        enabled = true,
       }
 
       local ok, err = Services:validate(service)
@@ -544,6 +571,7 @@ describe("services", function()
         protocol = "grpcs",
         host = "x.y",
         port = 80,
+        enabled = true,
       }
 
       local ok, err = Services:validate(service)
@@ -558,6 +586,7 @@ describe("services", function()
           host = "x.y",
           port = 80,
           path = "/",
+          enabled = true,
         }
 
         local ok, errs = Services:validate(service)

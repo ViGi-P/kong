@@ -1,23 +1,22 @@
 -- Copyright (c) Kong Inc. 2020
 
-package.loaded.lua_pack = nil   -- BUG: why?
-require "lua_pack"
-local cjson = require "cjson"
-local protoc = require "protoc"
+local cjson = require "cjson.safe".new()
+local buffer = require "string.buffer"
 local pb = require "pb"
-local pl_path = require "pl.path"
-local date = require "date"
+local grpc_tools = require "kong.tools.grpc"
+local grpc_frame = grpc_tools.frame
+local grpc_unframe = grpc_tools.unframe
 
 local setmetatable = setmetatable
-
-local bpack = string.pack         -- luacheck: ignore string
-local bunpack = string.unpack     -- luacheck: ignore string
 
 local ngx = ngx
 local re_gsub = ngx.re.gsub
 local re_match = ngx.re.match
+local re_gmatch = ngx.re.gmatch
 
 local encode_json = cjson.encode
+local decode_json = cjson.decode
+local pcall = pcall
 
 local deco = {}
 deco.__index = deco
@@ -79,46 +78,6 @@ local function parse_options_path(path)
   return path_regex, match_groups
 end
 
-local function safe_set_type_hook(type, dec, enc)
-  if not pcall(pb.hook, type) then
-    ngx.log(ngx.NOTICE, "no type '" .. type .. "' defined")
-    return
-  end
-
-  if not pb.hook(type) then
-    pb.hook(type, dec)
-  end
-
-  if not pb.encode_hook(type) then
-    pb.encode_hook(type, enc)
-  end
-end
-
-local function set_hooks()
-  pb.option("enable_hooks")
-  local epoch = date.epoch()
-
-  safe_set_type_hook(
-      ".google.protobuf.Timestamp",
-      function (t)
-        if type(t) ~= "table" then
-          error(string.format("expected table, got (%s)%q", type(t), tostring(t)))
-        end
-
-        return date(t.seconds):fmt("${iso}")
-      end,
-      function (t)
-        if type(t) ~= "string" then
-          error (string.format("expected time string, got (%s)%q", type(t), tostring(t)))
-        end
-
-        local ds = date(t) - epoch
-        return {
-          seconds = ds:spanseconds(),
-          nanos = ds:getticks() * 1000,
-        }
-      end)
-end
 
 -- parse, compile and load .proto file
 -- returns a table mapping valid request URLs to input/output types
@@ -129,52 +88,38 @@ local function get_proto_info(fname)
     return info
   end
 
-  local dir, name = pl_path.splitpath(pl_path.abspath(fname))
-  local p = protoc.new()
-  p:addpath("/usr/include")
-  p:addpath("/usr/local/opt/protobuf/include/")
-  p:addpath("/usr/local/kong/lib/")
-  p:addpath("kong")
-
-  p.include_imports = true
-  p:addpath(dir)
-  p:loadfile(name)
-  set_hooks()
-  local parsed = p:parsefile(name)
-
   info = {}
 
-  for _, srvc in ipairs(parsed.service) do
-    for _, mthd in ipairs(srvc.method) do
-      local options_bindings =  {
-        safe_access(mthd, "options", "options", "google.api.http"),
-        safe_access(mthd, "options", "options", "google.api.http", "additional_bindings")
-      }
-      for _, options in ipairs(options_bindings) do
-        for http_method, http_path in pairs(options) do
-          http_method = http_method:lower()
-          if valid_method[http_method] then
-            local preg, grp, err = parse_options_path(http_path)
-            if err then
-              ngx.log(ngx.ERR, "error ", err, "parsing options path ", http_path)
-            else
-              if not info[http_method] then
-                info[http_method] = {}
-              end
-              table.insert(info[http_method], {
-                regex = preg,
-                varnames = grp,
-                rewrite_path = ("/%s.%s/%s"):format(parsed.package, srvc.name, mthd.name),
-                input_type = mthd.input_type,
-                output_type = mthd.output_type,
-                body_variable = options.body,
-              })
+  local grpc_tools_instance = grpc_tools.new()
+  grpc_tools_instance:each_method(fname, function(parsed, srvc, mthd)
+    local options_bindings =  {
+      safe_access(mthd, "options", "google.api.http"),
+      safe_access(mthd, "options", "google.api.http", "additional_bindings")
+    }
+    for _, options in ipairs(options_bindings) do
+      for http_method, http_path in pairs(options) do
+        http_method = http_method:lower()
+        if valid_method[http_method] then
+          local preg, grp, err = parse_options_path(http_path)
+          if err then
+            ngx.log(ngx.ERR, "error ", err, "parsing options path ", http_path)
+          else
+            if not info[http_method] then
+              info[http_method] = {}
             end
+            table.insert(info[http_method], {
+              regex = preg,
+              varnames = grp,
+              rewrite_path = ("/%s.%s/%s"):format(parsed.package, srvc.name, mthd.name),
+              input_type = mthd.input_type,
+              output_type = mthd.output_type,
+              body_variable = options.body,
+            })
           end
         end
       end
     end
-  end
+  end, true)
 
   _proto_info[fname] = info
   return info
@@ -227,25 +172,47 @@ function deco.new(method, path, protofile)
   }, deco)
 end
 
-
-local function frame(ftype, msg)
-  return bpack("C>I", ftype, #msg) .. msg
+local function get_field_type(typ, field)
+  local _, _, field_typ = pb.field(typ, field)
+  return field_typ
 end
 
-local function unframe(body)
-  if not body or #body <= 5 then
-    return nil, body
+local function encode_fix(v, typ)
+  if typ == "bool" then
+    -- special case for URI parameters
+    return v and v ~= "0" and v ~= "false"
   end
 
-  local pos, ftype, sz = bunpack(body, "C>I")       -- luacheck: ignore ftype
-  local frame_end = pos + sz - 1
-  if frame_end > #body then
-    return nil, body
-  end
-
-  return body:sub(pos, frame_end), body:sub(frame_end + 1)
+  return v
 end
 
+--[[
+  // Set value `v` at `path` in table `t`
+  // Path contains value address in dot-syntax. For example:
+  // `path="a.b.c"` would lead to `t[a][b][c] = v`.
+]]
+local function add_to_table( t, path, v, typ )
+  local tab = t -- set up pointer to table root
+  local msg_typ = typ;
+  for m in re_gmatch( path , "([^.]+)(\\.)?", "jo" ) do
+    local key, dot = m[1], m[2]
+    msg_typ = get_field_type(msg_typ, key)
+
+    -- not argument that we concern with
+    if not msg_typ then
+      return
+    end
+
+    if dot then
+      tab[key] = tab[key] or {} -- create empty nested table if key does not exist
+      tab = tab[key]
+    else
+      tab[key] = encode_fix(v, msg_typ)
+    end
+  end
+
+  return t
+end
 
 function deco:upstream(body)
   --[[
@@ -260,7 +227,10 @@ function deco:upstream(body)
   local body_variable = self.endpoint.body_variable
   if body_variable then
     if body and #body > 0 then
-      local body_decoded = cjson.decode(body)
+      local body_decoded, err = decode_json(body)
+      if err then
+        return nil, "decode json err: " .. err
+      end
       if body_variable ~= "*" then
         --[[
           // For HTTP methods that allow a request body, the `body` field
@@ -291,12 +261,28 @@ function deco:upstream(body)
     local args, err = ngx.req.get_uri_args()
     if not err then
       for k, v in pairs(args) do
-        payload[k] = v
+        --[[
+          // According to [spec](https://github.com/googleapis/googleapis/blob/master/google/api/http.proto#L113)
+          // non-repeated message fields are supported.
+          //
+          // For example: `GET /v1/messages/123456?revision=2&sub.subfield=foo`
+          // translates into `payload = { sub = { subfield = "foo" }}`
+        ]]--
+        add_to_table( payload, k, v, self.endpoint.input_type)
       end
     end
   end
-  body = frame(0x0, pb.encode(self.endpoint.input_type, payload))
 
+  local pok, msg = pcall(pb.encode, self.endpoint.input_type, payload)
+  if not pok or not msg then
+    if msg then
+      ngx.log(ngx.ERR, msg)
+    end
+    -- should return error msg to client?
+    return nil, "failed to encode payload"
+  end
+
+  body = grpc_frame(0x0, msg)
   return body
 end
 
@@ -304,19 +290,18 @@ end
 function deco:downstream(chunk)
   local body = (self.downstream_body or "") .. chunk
 
-  local out, n = {}, 1
-  local msg, body = unframe(body)
+  local out = buffer.new()
+  local msg, body = grpc_unframe(body)
 
   while msg do
     msg = encode_json(pb.decode(self.endpoint.output_type, msg))
 
-    out[n] = msg
-    n = n + 1
-    msg, body = unframe(body)
+    out:put(msg)
+    msg, body = grpc_unframe(body)
   end
 
   self.downstream_body = body
-  chunk = table.concat(out)
+  chunk = out:get()
 
   return chunk
 end

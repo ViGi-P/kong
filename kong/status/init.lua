@@ -1,13 +1,12 @@
 local lapis       = require "lapis"
-local utils       = require "kong.tools.utils"
-local singletons  = require "kong.singletons"
 local api_helpers = require "kong.api.api_helpers"
 local hooks       = require "kong.hooks"
+local load_module_if_exists = require "kong.tools.module".load_module_if_exists
 
 
-
-local ngx      = ngx
-local pairs    = pairs
+local ngx = ngx
+local kong = kong
+local pairs = pairs
 
 
 local app = lapis.Application()
@@ -27,6 +26,8 @@ ngx.log(ngx.DEBUG, "Loading Status API endpoints")
 
 -- Load core health route
 api_helpers.attach_routes(app, require "kong.api.routes.health")
+api_helpers.attach_routes(app, require "kong.status.ready")
+api_helpers.attach_routes(app, require "kong.api.routes.dns")
 
 
 if kong.configuration.database == "off" then
@@ -56,10 +57,10 @@ if kong.configuration.database == "off" then
 end
 
 -- Load plugins status routes
-if singletons.configuration and singletons.configuration.loaded_plugins then
-  for k in pairs(singletons.configuration.loaded_plugins) do
-    local loaded, mod = utils.load_module_if_exists("kong.plugins." ..
-                                                    k .. ".status_api")
+if kong.configuration and kong.configuration.loaded_plugins then
+  for k in pairs(kong.configuration.loaded_plugins) do
+    local loaded, mod = load_module_if_exists("kong.plugins." ..
+                                              k .. ".status_api")
 
     if loaded then
       ngx.log(ngx.DEBUG, "Loading Status API endpoints for plugin: ", k)

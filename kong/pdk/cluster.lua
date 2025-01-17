@@ -1,4 +1,4 @@
---- Cluster-level utilities
+--- Cluster-level utilities.
 --
 -- @module kong.cluster
 
@@ -22,18 +22,18 @@ local function new(self)
 
 
   ---
-  -- Returns the unique id for this Kong cluster. If Kong
+  -- Returns the unique ID for this Kong cluster. If Kong
   -- is running in DB-less mode without a cluster ID explicitly defined,
-  -- then this method returns nil.
+  -- then this method returns `nil`.
   --
-  -- For Hybrid mode, all Control Planes and Data Planes belonging to the same
-  -- cluster returns the same cluster ID. For traditional database based
-  -- deployments, all Kong nodes pointing to the same database will also return
+  -- For hybrid mode, all control planes and data planes belonging to the same
+  -- cluster return the same cluster ID. For traditional database-based
+  -- deployments, all Kong nodes pointing to the same database also return
   -- the same cluster ID.
   --
   -- @function kong.cluster.get_id
-  -- @treturn string|nil The v4 UUID used by this cluster as its id
-  -- @treturn string|nil an error message
+  -- @treturn string|nil The v4 UUID used by this cluster as its ID.
+  -- @treturn string|nil An error message.
   -- @usage
   -- local id, err = kong.cluster.get_id()
   -- if err then
@@ -46,9 +46,13 @@ local function new(self)
   --
   -- -- use id here
   function _CLUSTER.get_id()
-    return kong.core_cache:get(CLUSTER_ID_PARAM_KEY, nil, fetch_cluster_id)
-  end
+    local cluster_id, err = kong.core_cache:get(CLUSTER_ID_PARAM_KEY, nil, fetch_cluster_id)
+    if err then
+      return nil, err
+    end
 
+    return cluster_id
+  end
 
   return _CLUSTER
 end

@@ -1,8 +1,7 @@
-local singletons = require "kong.singletons"
 local balancer = require "kong.runloop.balancer"
-local utils = require "kong.tools.utils"
 local cjson = require "cjson"
 local workspaces   = require "kong.workspaces"
+local tools_ip = require "kong.tools.ip"
 
 
 local setmetatable = setmetatable
@@ -11,6 +10,7 @@ local ipairs = ipairs
 local table = table
 local type = type
 local min = math.min
+local table_merge = require("kong.tools.table").table_merge
 
 
 local _TARGETS = {}
@@ -29,11 +29,11 @@ end
 
 
 local function format_target(target)
-  local p = utils.normalize_ip(target)
+  local p = tools_ip.normalize_ip(target)
   if not p then
     return false, "Invalid target; not a valid hostname or ip address"
   end
-  return utils.format_host(p, DEFAULT_PORT)
+  return tools_ip.format_host(p, DEFAULT_PORT)
 end
 
 
@@ -45,15 +45,6 @@ function _TARGETS:insert(entity, options)
       return nil, tostring(err_t), err_t
     end
     entity.target = formatted_target
-  end
-
-  local workspace = workspaces.get_workspace_id()
-  local opts = { nulls = true, workspace = workspace }
-  for existent in self:each_for_upstream(entity.upstream, nil, opts) do
-    if existent.target == entity.target then
-      local err_t = self.errors:unique_violation({ target = existent.target })
-      return nil, tostring(err_t), err_t
-    end
   end
 
   return self.super.insert(self, entity, options)
@@ -75,11 +66,14 @@ function _TARGETS:upsert(pk, entity, options)
   -- backward compatibility with Kong older than 2.2.0
   local workspace = workspaces.get_workspace_id()
   local opts = { nulls = true, workspace = workspace }
-  for existent in self:each_for_upstream(entity.upstream, nil, opts) do
+  for existent, err, err_t in self:each_for_upstream(entity.upstream, nil, opts) do
+    if not existent then
+      return nil, err, err_t
+    end
     if existent.target == entity.target then
       -- if the upserting entity is newer, update
       if entity.created_at > existent.created_at then
-        local ok, err, err_t = self.super.delete(self, { id = existent.id }, opts)
+        local ok, err, err_t = self.super.delete(self, existent, opts)
         if ok then
           return self.super.insert(self, entity, options)
         end
@@ -88,7 +82,6 @@ function _TARGETS:upsert(pk, entity, options)
       end
       -- if upserting entity is older, keep the existent entity
       return true
-
     end
   end
 
@@ -207,7 +200,7 @@ function _TARGETS:page_for_upstream(upstream_pk, size, offset, options)
   local pagination = self.pagination
 
   if type(options) == "table" and type(options.pagination) == "table" then
-    pagination = utils.table_merge(pagination, options.pagination)
+    pagination = table_merge(pagination, options.pagination)
   end
 
   if not size then
@@ -305,13 +298,13 @@ end
 
 function _TARGETS:post_health(upstream_pk, target, address, is_healthy)
   local upstream = balancer.get_upstream_by_id(upstream_pk.id)
-  local host_addr = utils.normalize_ip(target.target)
-  local hostname = utils.format_host(host_addr.host)
+  local host_addr = tools_ip.normalize_ip(target.target)
+  local hostname = tools_ip.format_host(host_addr.host)
   local ip
   local port
 
   if address ~= nil then
-    local addr = utils.normalize_ip(address)
+    local addr = tools_ip.normalize_ip(address)
     ip = addr.host
     if addr.port then
       port = addr.port
@@ -333,7 +326,7 @@ function _TARGETS:post_health(upstream_pk, target, address, is_healthy)
                                            upstream.id,
                                            upstream.name)
 
-  singletons.cluster_events:broadcast("balancer:post_health", packet)
+  kong.cluster_events:broadcast("balancer:post_health", packet)
 
   return true
 end

@@ -9,10 +9,22 @@ for _, strategy in helpers.each_strategy() do
     local proxy_client, admin_client
 
     lazy_setup(function()
-      helpers.get_db_utils(strategy, {
+      local _, db = helpers.get_db_utils(strategy, {
         "routes",
         "services",
       }) -- runs migrations
+
+      -- db RO permissions setup
+      local pg_ro_user = helpers.test_conf.pg_ro_user
+      local pg_db = helpers.test_conf.pg_database
+      db:schema_reset()
+      db.connector:query(string.format("CREATE user %s;", pg_ro_user))
+      db.connector:query(string.format([[
+        GRANT CONNECT ON DATABASE %s TO %s;
+        GRANT USAGE ON SCHEMA public TO %s;
+        ALTER DEFAULT PRIVILEGES FOR ROLE kong IN SCHEMA public GRANT SELECT ON TABLES TO %s;
+      ]], pg_db, pg_ro_user, pg_ro_user, pg_ro_user))
+      helpers.bootstrap_database(db)
 
       assert(helpers.start_kong({
         database = strategy,
@@ -54,12 +66,16 @@ for _, strategy in helpers.each_strategy() do
 
         route_id = json.id
 
-        res = assert(proxy_client:send({
-          method  = "GET",
-          path    = "/",
-        }))
+        helpers.wait_until(function()
+          res = assert(proxy_client:send({
+            method  = "GET",
+            path    = "/",
+          }))
 
-        assert.res_status(200, res)
+          return pcall(function()
+            assert.res_status(200, res)
+          end)
+        end, 10)
       end)
 
       it("cache invalidation works on config change", function()
@@ -69,12 +85,16 @@ for _, strategy in helpers.each_strategy() do
         }))
         assert.res_status(204, res)
 
-        res = assert(proxy_client:send({
-          method  = "GET",
-          path    = "/",
-        }))
+        helpers.wait_until(function()
+          res = assert(proxy_client:send({
+            method  = "GET",
+            path    = "/",
+          }))
 
-        assert.res_status(404, res)
+          return pcall(function()
+            assert.res_status(404, res)
+          end)
+        end, 10)
       end)
     end)
   end)
@@ -89,6 +109,7 @@ for _, strategy in helpers.each_strategy() do
       }) -- runs migrations
 
       assert(helpers.start_kong({
+        worker_consistency = "strict",
         database = strategy,
         pg_ro_host = helpers.test_conf.pg_host,
         pg_ro_port = 9090, -- connection refused
@@ -123,15 +144,20 @@ for _, strategy in helpers.each_strategy() do
         }))
         assert.res_status(201, res)
 
-        res = assert(proxy_client:send({
-          method  = "GET",
-          path    = "/",
-        }))
+        helpers.wait_until(function()
+          res = assert(proxy_client:send({
+            method  = "GET",
+            path    = "/",
+          }))
 
-        assert.res_status(404, res)
-        assert.logfile().has.line("get_updated_router(): could not rebuild router: " ..
+          return pcall(function()
+            assert.res_status(404, res)
+            assert.logfile().has.line("get_updated_router(): could not rebuild router: " ..
                                   "could not load routes: [postgres] connection " ..
                                   "refused (stale router will be used)", true)
+          end)
+        end, 10)
+
       end)
     end)
   end)

@@ -12,10 +12,14 @@ on:
       target_branch:
         description: "Target Branch in kong/docs.konghq.com (e.g. release/2.4)"
         required: true
+      force_build:
+        description: "Ignore the build cache and build dependencies from scratch"
+        type: boolean
+        default: false
 jobs:
   build:
     name: Build dependencies
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
 
     env:
       DOWNLOAD_ROOT: $HOME/download-root
@@ -28,45 +32,45 @@ jobs:
           echo "LD_LIBRARY_PATH=$INSTALL_ROOT/openssl/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
 
       - name: Checkout Kong source code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
       - name: Lookup build cache
-        uses: actions/cache@v2
+        uses: actions/cache@v4
         id: cache-deps
         with:
           path: ${{ env.INSTALL_ROOT }}
           key: ${{ hashFiles('.ci/setup_env_github.sh') }}-${{ hashFiles('.requirements') }}-${{ hashFiles('kong-*.rockspec') }}
 
       - name: Checkout kong-build-tools
-        if: steps.cache-deps.outputs.cache-hit != 'true'
-        uses: actions/checkout@v2
+        if: steps.cache-deps.outputs.cache-hit != 'true' || github.event.inputs.force_build == 'true'
+        uses: actions/checkout@v4
         with:
           repository: Kong/kong-build-tools
           path: kong-build-tools
           ref: master
 
       - name: Checkout go-pluginserver
-        if: steps.cache-deps.outputs.cache-hit != 'true'
-        uses: actions/checkout@v2
+        if: steps.cache-deps.outputs.cache-hit != 'true' || github.event.inputs.force_build == 'true'
+        uses: actions/checkout@v4
         with:
           repository: Kong/go-pluginserver
           path: go-pluginserver
 
       - name: Add to Path
-        if: steps.cache-deps.outputs.cache-hit != 'true'
+        if: steps.cache-deps.outputs.cache-hit != 'true' || github.event.inputs.force_build == 'true'
         run: echo "$INSTALL_ROOT/openssl/bin:$INSTALL_ROOT/openresty/nginx/sbin:$INSTALL_ROOT/openresty/bin:$INSTALL_ROOT/luarocks/bin:$GITHUB_WORKSPACE/kong-build-tools/openresty-build-tools" >> $GITHUB_PATH
 
       - name: Install packages
-        if: steps.cache-deps.outputs.cache-hit != 'true'
+        if: steps.cache-deps.outputs.cache-hit != 'true' || github.event.inputs.force_build == 'true'
         run: sudo apt update && sudo apt install libyaml-dev valgrind
 
       - name: Build Kong dependencies
-        if: steps.cache-deps.outputs.cache-hit != 'true'
+        if: steps.cache-deps.outputs.cache-hit != 'true' || github.event.inputs.force_build == 'true'
         run: |
           source .ci/setup_env_github.sh
           make dev
   autodoc:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     needs: [build]
     steps:
       - name: Set environment variables
@@ -76,13 +80,13 @@ jobs:
           echo "LD_LIBRARY_PATH=$INSTALL_ROOT/openssl/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
 
       - name: Checkout Kong source code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
         with:
           path: kong
           ref: ${{ github.event.inputs.source_branch }}
 
       - name: Checkout Kong Docs
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
         with:
           repository: kong/docs.konghq.com
           path: docs.konghq.com
@@ -90,7 +94,7 @@ jobs:
           ref: ${{ github.event.inputs.target_branch }}
 
       - name: Lookup build cache
-        uses: actions/cache@v2
+        uses: actions/cache@v4
         id: cache-deps
         with:
           path: ${{ env.INSTALL_ROOT }}
@@ -110,7 +114,7 @@ jobs:
         run: |
           cd kong
           output="$(git branch --show-current)"
-          echo "::set-output name=name::$output"
+          echo "name=$output" >> $GITHUB_OUTPUT
 
       - name: Show Docs status
         run: |
@@ -119,7 +123,7 @@ jobs:
           git checkout -b "autodocs-${{ steps.kong-branch.outputs.name }}"
 
       - name: Commit autodoc changes
-        uses: stefanzweifel/git-auto-commit-action@v4
+        uses: stefanzweifel/git-auto-commit-action@8621497c8c39c72f3e2a999a26b4ca1b5058a842 # v5
         with:
           repository: "./docs.konghq.com"
           commit_message: "Autodocs update"
@@ -131,4 +135,4 @@ jobs:
         run: |
           cd docs.konghq.com
           echo "${{ secrets.PAT }}" | gh auth login --with-token
-          gh pr create --base "${{ github.event.inputs.target_branch }}" --fill
+          gh pr create --base "${{ github.event.inputs.target_branch }}" --fill --label "review:autodoc"

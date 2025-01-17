@@ -1,8 +1,7 @@
 local helpers = require "spec.helpers"
 local fmt = string.format
 local lower = string.lower
-local sha1_bin = ngx.sha1_bin
-local to_hex = require "resty.string".to_hex
+local sha256_hex = require("kong.tools.sha256").sha256_hex
 
 local ldap_host_aws = "ec2-54-172-82-117.compute-1.amazonaws.com"
 
@@ -27,7 +26,7 @@ for _, ldap_strategy in pairs(ldap_strategies) do
           })
 
           local route = bp.routes:insert {
-            hosts = { "ldapauth.com" },
+            hosts = { "ldapauth.test" },
           }
 
           plugin = bp.plugins:insert {
@@ -64,18 +63,18 @@ for _, ldap_strategy in pairs(ldap_strategies) do
         end)
 
         lazy_teardown(function()
-          helpers.stop_kong(nil, true)
+          helpers.stop_kong()
         end)
 
         local function cache_key(conf, username, password)
-          local hash = to_hex(sha1_bin(fmt("%s:%u:%s:%s:%u:%s:%s",
-                                           lower(conf.ldap_host),
-                                           conf.ldap_port,
-                                           conf.base_dn,
-                                           conf.attribute,
-                                           conf.cache_ttl,
-                                           username,
-                                           password)))
+          local hash = sha256_hex(fmt("%s:%u:%s:%s:%u:%s:%s",
+                                      lower(conf.ldap_host),
+                                      conf.ldap_port,
+                                      conf.base_dn,
+                                      conf.attribute,
+                                      conf.cache_ttl,
+                                      username,
+                                      password))
 
           return "ldap_auth_cache:" .. hash
         end
@@ -87,7 +86,7 @@ for _, ldap_strategy in pairs(ldap_strategies) do
               path = "/requests",
               body = {},
               headers = {
-                ["HOST"] = "ldapauth.com",
+                ["HOST"] = "ldapauth.test",
                 authorization = "ldap " .. ngx.encode_base64("einstein:wrongpassword")
               }
             })
@@ -113,7 +112,7 @@ for _, ldap_strategy in pairs(ldap_strategies) do
               path = "/requests",
               body = {},
               headers = {
-                ["HOST"] = "ldapauth.com",
+                ["HOST"] = "ldapauth.test",
                 authorization = "ldap " .. ngx.encode_base64("einstein:password")
               }
             })
